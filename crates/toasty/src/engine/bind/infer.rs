@@ -287,6 +287,20 @@ pub(super) fn synthesize(expr: &stmt::Expr, cx: &Cx<'_>, params: &mut [Param]) -
             Ty::Inferred(db::Type::Boolean)
         }
 
+        // Between — the subject and both bounds share one type, as the two
+        // sides of a comparison do: a bound whose value alone does not fix a
+        // storage type (a float) takes the column's.
+        stmt::Expr::Between(between) => {
+            let expr_ty = synthesize(&between.expr, cx, params);
+            let low_ty = synthesize(&between.low, cx, params);
+            let high_ty = synthesize(&between.high, cx, params);
+            let merged = merge(&merge(&expr_ty, &low_ty), &high_ty);
+            check(&between.expr, &merged, params);
+            check(&between.low, &merged, params);
+            check(&between.high, &merged, params);
+            Ty::Inferred(db::Type::Boolean)
+        }
+
         // InList — synthesize expr, check list items against it
         stmt::Expr::InList(in_list) => {
             let expr_ty = synthesize(&in_list.expr, cx, params);

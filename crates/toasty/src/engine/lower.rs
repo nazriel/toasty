@@ -719,6 +719,10 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
                     *expr = lowered;
                 }
             }
+            stmt::Expr::Between(e) => {
+                stmt::visit_mut::visit_expr_between_mut(self, e);
+                self.lower_expr_between(e);
+            }
             // App-level rewrite: an OR covering every variant of an enum
             // via `IsVariant` is a tautology.  Must fire before the children
             // walk lowers the `IsVariant` nodes into discriminant
@@ -1636,6 +1640,20 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             }
             _ => None,
         }
+    }
+
+    /// A `BETWEEN` whose subject decodes a column stored in another type
+    /// (e.g. a date kept as text) compares in the stored type, as a binary
+    /// comparison does: the decode is stripped and both bounds are cast to
+    /// the stored type.
+    fn lower_expr_between(&mut self, e: &mut stmt::ExprBetween) {
+        let stmt::Expr::Cast(expr_cast) = &*e.expr else {
+            return;
+        };
+        let target_ty = self.capability().native_type_for(&expr_cast.ty);
+        self.cast_expr(&mut e.expr, &target_ty);
+        self.cast_expr(&mut e.low, &target_ty);
+        self.cast_expr(&mut e.high, &target_ty);
     }
 
     /// Combines per-element comparisons of two record-shaped operands into a

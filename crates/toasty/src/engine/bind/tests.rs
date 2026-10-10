@@ -252,6 +252,46 @@ fn synthesize_multi_step_projection() {
     );
 }
 
+#[test]
+fn synthesize_between_pushes_the_subject_type_into_both_bounds() {
+    // A float value carries no storage type of its own (`Float(4)` or
+    // `Float(8)`), so its param starts `Unknown`. `BETWEEN` must type both
+    // bounds from its subject, as a binary comparison types its other side.
+
+    use super::infer::synthesize;
+
+    let schema = test_schema();
+
+    let mut params = vec![
+        Param {
+            value: Value::from(0.0f64),
+            ty: Ty::Column(db::Type::Float(8)),
+        },
+        Param {
+            value: Value::from(1.0f64),
+            ty: Ty::Unknown,
+        },
+        Param {
+            value: Value::from(2.0f64),
+            ty: Ty::Unknown,
+        },
+    ];
+
+    let expr = Expr::between(Expr::arg(0), Expr::arg(1), Expr::arg(2));
+
+    let cx = stmt::ExprContext::new(&schema.db);
+    let ty = synthesize(&expr, &cx, &mut params);
+
+    assert!(matches!(ty, Ty::Inferred(db::Type::Boolean)), "got {ty:?}");
+    for param in &params[1..] {
+        assert!(
+            matches!(param.ty, Ty::Column(db::Type::Float(8))),
+            "expected Column(Float(8)), got {:?}",
+            param.ty
+        );
+    }
+}
+
 // ============================================================================
 // Invalid state panics
 // ============================================================================

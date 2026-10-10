@@ -208,3 +208,166 @@ pub async fn filter_between_gsi_sort_key(test: &mut Test) -> Result<()> {
 
     Ok(())
 }
+
+/// `between()` on a float column. A float literal carries no storage type of
+/// its own, so its bounds take the column's.
+#[driver_test]
+pub async fn filter_between_f64(test: &mut Test) -> Result<()> {
+    #[derive(Debug, toasty::Model)]
+    struct Item {
+        #[key]
+        #[auto]
+        id: uuid::Uuid,
+
+        price: f64,
+    }
+
+    let mut db = test.setup_db(models!(Item)).await;
+
+    for price in [0.5_f64, 1.0, 1.5, 2.0, 2.5] {
+        Item::create().price(price).exec(&mut db).await?;
+    }
+
+    let items: Vec<_> = Item::filter(Item::fields().price().between(1.0_f64, 2.0_f64))
+        .exec(&mut db)
+        .await?;
+
+    let mut prices: Vec<_> = items.iter().map(|i| i.price).collect();
+    prices.sort_by(f64::total_cmp);
+    assert_eq!(prices, [1.0, 1.5, 2.0]);
+
+    Ok(())
+}
+
+/// `between()` on a nullable float column matches the values inside the
+/// range, both bounds included, and never a NULL.
+#[driver_test]
+pub async fn filter_between_nullable_f64(test: &mut Test) -> Result<()> {
+    #[derive(Debug, toasty::Model)]
+    struct Item {
+        #[key]
+        #[auto]
+        id: uuid::Uuid,
+
+        price: Option<f64>,
+    }
+
+    let mut db = test.setup_db(models!(Item)).await;
+
+    for price in [
+        Some(0.5_f64),
+        Some(1.0),
+        Some(1.5),
+        Some(2.0),
+        Some(2.5),
+        None,
+    ] {
+        Item::create().price(price).exec(&mut db).await?;
+    }
+
+    let items: Vec<_> = Item::filter(Item::fields().price().between(1.0_f64, 2.0_f64))
+        .exec(&mut db)
+        .await?;
+
+    let mut prices: Vec<_> = items.iter().map(|i| i.price.unwrap()).collect();
+    prices.sort_by(f64::total_cmp);
+    assert_eq!(prices, [1.0, 1.5, 2.0]);
+
+    // A range that covers every value still leaves out the NULL.
+    let items: Vec<_> = Item::filter(Item::fields().price().between(-1.0e9_f64, 1.0e9_f64))
+        .exec(&mut db)
+        .await?;
+    assert_eq!(items.len(), 5);
+    assert!(items.iter().all(|i| i.price.is_some()));
+
+    Ok(())
+}
+
+/// `between()` on a nullable integer column matches the values inside the
+/// range, both bounds included, and never a NULL.
+#[driver_test]
+pub async fn filter_between_nullable_i64(test: &mut Test) -> Result<()> {
+    #[derive(Debug, toasty::Model)]
+    struct Item {
+        #[key]
+        #[auto]
+        id: uuid::Uuid,
+
+        score: Option<i64>,
+    }
+
+    let mut db = test.setup_db(models!(Item)).await;
+
+    for score in [Some(10_i64), Some(20), Some(30), Some(40), Some(50), None] {
+        Item::create().score(score).exec(&mut db).await?;
+    }
+
+    let items: Vec<_> = Item::filter(Item::fields().score().between(20_i64, 40_i64))
+        .exec(&mut db)
+        .await?;
+    assert_eq_unordered!(
+        items.iter().map(|i| i.score),
+        [&Some(20), &Some(30), &Some(40)]
+    );
+
+    let items: Vec<_> = Item::filter(Item::fields().score().between(i64::MIN, i64::MAX))
+        .exec(&mut db)
+        .await?;
+    assert_eq!(items.len(), 5);
+    assert!(items.iter().all(|i| i.score.is_some()));
+
+    Ok(())
+}
+
+/// `between()` on a nullable date column matches the dates inside the range,
+/// both bounds included, and never a NULL.
+#[driver_test]
+pub async fn filter_between_nullable_date(test: &mut Test) -> Result<()> {
+    use jiff::civil::Date;
+
+    #[derive(Debug, toasty::Model)]
+    struct Item {
+        #[key]
+        #[auto]
+        id: uuid::Uuid,
+
+        due: Option<Date>,
+    }
+
+    let mut db = test.setup_db(models!(Item)).await;
+
+    let dates = [
+        Date::constant(2024, 1, 31),
+        Date::constant(2024, 2, 1),
+        Date::constant(2024, 2, 15),
+        Date::constant(2024, 2, 29),
+        Date::constant(2024, 3, 1),
+    ];
+    for due in dates.iter().copied().map(Some).chain([None]) {
+        Item::create().due(due).exec(&mut db).await?;
+    }
+
+    let items: Vec<_> = Item::filter(
+        Item::fields()
+            .due()
+            .between(Date::constant(2024, 2, 1), Date::constant(2024, 2, 29)),
+    )
+    .exec(&mut db)
+    .await?;
+    assert_eq_unordered!(
+        items.iter().map(|i| i.due),
+        [&Some(dates[1]), &Some(dates[2]), &Some(dates[3])]
+    );
+
+    let items: Vec<_> = Item::filter(
+        Item::fields()
+            .due()
+            .between(Date::constant(1900, 1, 1), Date::constant(2100, 1, 1)),
+    )
+    .exec(&mut db)
+    .await?;
+    assert_eq!(items.len(), 5);
+    assert!(items.iter().all(|i| i.due.is_some()));
+
+    Ok(())
+}
