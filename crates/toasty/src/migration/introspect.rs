@@ -10,10 +10,44 @@ use crate::{Db, Dialect, Error, Executor, Result, stmt::Value};
 /// Only what every SQL database can report is read: names, nullability,
 /// uniqueness, the indexed columns and a partial index's predicate. Storage
 /// types are driver-specific and are not compared.
+///
+/// # Virtual tables
+///
+/// A virtual table, such as a SQLite full-text index, and the shadow tables
+/// the database keeps for it are not part of `tables`: no model declares
+/// them, and a migration written by hand creates them. They are listed in
+/// `skipped`, so that a project can still assert that one exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DatabaseSchema {
     /// The tables, ordered by name.
     pub tables: Vec<DatabaseTable>,
+
+    /// The virtual tables and shadow tables that were left out of `tables`,
+    /// ordered by name.
+    pub skipped: Vec<SkippedTable>,
+}
+
+/// A table [`DatabaseSchema::read`] left out because it is a virtual table or
+/// belongs to one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedTable {
+    /// The table name.
+    pub name: String,
+
+    /// Why the table was left out.
+    pub kind: SkippedTableKind,
+}
+
+/// Why [`DatabaseSchema::read`] left a table out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SkippedTableKind {
+    /// A virtual table, created with `CREATE VIRTUAL TABLE`.
+    Virtual,
+
+    /// A table the database created to back a virtual table, such as the
+    /// `_data` and `_idx` tables of a SQLite `fts5` index.
+    Shadow,
 }
 
 /// A table of a [`DatabaseSchema`].
@@ -71,12 +105,14 @@ impl DatabaseSchema {
     /// Reads the schema of the database `db` is connected to.
     ///
     /// Toasty's own migration tracking table and the database's internal
-    /// tables are left out.
+    /// tables are left out. So are virtual tables and their shadow tables;
+    /// they are reported in [`skipped`](DatabaseSchema::skipped).
     ///
     /// # Errors
     ///
     /// Returns an `unsupported_feature` error for a driver that cannot report
-    /// its schema yet. SQLite can.
+    /// its schema yet. SQLite can, from version 3.37 on, which is when
+    /// `pragma table_list` learned to tell shadow tables apart.
     ///
     /// # Examples
     ///
@@ -121,6 +157,12 @@ impl DatabaseSchema {
     pub fn table(&self, name: &str) -> Option<&DatabaseTable> {
         self.tables.iter().find(|table| table.name == name)
     }
+
+    /// Returns the table named `name` among those that were left out, which
+    /// tells whether a virtual table exists.
+    pub fn skipped_table(&self, name: &str) -> Option<&SkippedTable> {
+        self.skipped.iter().find(|table| table.name == name)
+    }
 }
 
 impl DatabaseTable {
@@ -139,17 +181,31 @@ impl DatabaseTable {
 const MIGRATIONS_TABLE: &str = "__toasty_migrations";
 
 async fn read_sqlite(executor: &mut dyn Executor) -> Result<DatabaseSchema> {
+    // `pragma table_list` marks a virtual table `virtual` and the tables the
+    // database keeps for it `shadow`, so no name is guessed at.
     let names = rows(
         executor,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
+        "SELECT name, type FROM pragma_table_list WHERE schema = 'main' \
+         AND type IN ('table', 'virtual', 'shadow') \
+         AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
         &[],
     )
     .await?;
 
     let mut tables = Vec::with_capacity(names.len());
+    let mut skipped = Vec::new();
     for row in names {
         let name = text(&row, 0)?;
         if name == MIGRATIONS_TABLE {
+            continue;
+        }
+        let kind = match text(&row, 1)?.as_str() {
+            "virtual" => Some(SkippedTableKind::Virtual),
+            "shadow" => Some(SkippedTableKind::Shadow),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            skipped.push(SkippedTable { name, kind });
             continue;
         }
 
@@ -233,7 +289,7 @@ async fn read_sqlite(executor: &mut dyn Executor) -> Result<DatabaseSchema> {
         });
     }
 
-    Ok(DatabaseSchema { tables })
+    Ok(DatabaseSchema { tables, skipped })
 }
 
 /// The predicate of a `CREATE INDEX ... WHERE <predicate>` statement: the

@@ -38,6 +38,7 @@ parsing and all migration subcommands:
 | Command | What it does |
 |---|---|
 | `migration generate` | Diffs the current schema against the last snapshot and writes a SQL migration file |
+| `migration new <name>` | Writes an empty migration for SQL the models do not imply, such as a trigger or a virtual table |
 | `migration apply` | Runs pending migrations against the database |
 | `migration snapshot` | Prints the current schema as TOML |
 | `migration drop` | Removes a migration from history and deletes its files |
@@ -148,6 +149,47 @@ Choosing the rename option generates an `ALTER TABLE ... RENAME` statement
 instead of a `DROP TABLE` followed by a `CREATE TABLE`. Index names include the
 table's name, so each of the table's other indices is dropped and created again
 under its new name. The primary key is part of the table and needs no statement.
+
+## Writing a migration by hand
+
+Some SQL cannot be declared on a model: a trigger, a backfill, a column default
+Toasty does not generate, or a SQLite virtual table such as a full-text index.
+`migration generate` has nothing to write for these, because the models did not
+change. Create the migration with `migration new` and write the SQL in it:
+
+```bash
+cargo run --bin my-cli -- migration new add_article_search
+```
+
+The command writes the next numbered migration file, a snapshot equal to the
+previous one under the same number, and the history entry, the same three
+things `generate` writes. The file holds only a comment, so one that nobody
+edited applies as a no-op. Open it and write the SQL, separating statements
+with `-- #[toasty::breakpoint]` lines (a trigger body contains `;`, so the
+driver cannot split on semicolons):
+
+```sql
+CREATE VIRTUAL TABLE article_search USING fts5(title, body, content='articles', content_rowid='id');
+-- #[toasty::breakpoint]
+CREATE TRIGGER articles_after_insert AFTER INSERT ON articles BEGIN
+    INSERT INTO article_search(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+```
+
+`migration new` refuses to run when the models differ from the latest snapshot
+and tells you to run `migration generate` first, so a change to the models is
+never hidden in a hand-written step. It asks no questions and works without a
+terminal.
+
+Because the snapshot is copied unchanged, the next `generate` diffs against a
+schema that does not know about the hand-written objects. That is correct as
+long as the models do not declare them, and they cannot. A hand-written
+migration can also change what the models declare (for example, an index the
+models list); then the snapshot no longer matches the database, and
+[the migration ladder](#testing-migrations) reports the difference. Use
+`generate` for that kind of change.
+
+Query a virtual table with [raw SQL](raw-sql.md#virtual-tables-and-full-text-search).
 
 ## Applying migrations
 
@@ -289,6 +331,31 @@ reads a database's schema, and `SchemaDrift::between(&expected, &actual)`
 lists the differences from a `db::Schema`, such as `snapshot.schema` or
 `db.schema().db`. Reading the schema back is supported on SQLite; other
 drivers return an `unsupported_feature` error.
+
+### Virtual tables
+
+`DatabaseSchema::read` leaves out SQLite virtual tables (`CREATE VIRTUAL
+TABLE`) and the shadow tables SQLite keeps for them, such as the `_data`,
+`_idx`, `_content`, `_docsize` and `_config` tables of an `fts5` index. No
+model declares them, so the ladder reports no difference for a migration that
+creates one. Shadow tables are found with `pragma table_list`, which marks
+them `shadow` (SQLite 3.37 and later), not by their names: a table you create
+that merely ends in `_data` is still compared.
+
+What was left out is in `DatabaseSchema::skipped`, so a test can assert that
+the virtual table exists:
+
+```rust,ignore
+use toasty::migration::{DatabaseSchema, SkippedTableKind};
+
+let schema = DatabaseSchema::read(&db).await?;
+let search = schema.skipped_table("article_search").expect("the search index exists");
+assert_eq!(search.kind, SkippedTableKind::Virtual);
+```
+
+If the SQLite build does not have the virtual table's module compiled in
+(FTS5 is in the bundled build), SQLite reports its shadow tables as ordinary
+tables and they appear as unexpected tables.
 
 ## Inspecting the current schema
 

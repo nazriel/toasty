@@ -21,7 +21,9 @@ mod snapshot;
 pub use drift::{IndexShape, SchemaDifference, SchemaDrift};
 pub use embed::{MigrationFile, MigrationReport, MigrationSet};
 pub use generate::{Generated, generate};
-pub use introspect::{DatabaseColumn, DatabaseIndex, DatabaseSchema, DatabaseTable};
+pub use introspect::{
+    DatabaseColumn, DatabaseIndex, DatabaseSchema, DatabaseTable, SkippedTable, SkippedTableKind,
+};
 pub use ladder::{MigrationLadder, NoHook, Step};
 pub use snapshot::Snapshot;
 pub use toasty_core::migration::{History, HistoryEntry};
