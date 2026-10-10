@@ -830,6 +830,21 @@ fn is_empty_record_returning(returning: &stmt::Returning) -> bool {
     matches!(returning, stmt::Returning::Project(stmt::Expr::Record(record)) if record.fields.is_empty())
 }
 
+/// Whether `query` reads a field or column of an enclosing statement's row.
+fn refers_to_enclosing_row(query: &stmt::Query) -> bool {
+    let mut found = false;
+    stmt::visit::for_each_expr(query, |expr| {
+        if let stmt::Expr::Reference(
+            stmt::ExprReference::Field { nesting, .. } | stmt::ExprReference::Model { nesting },
+        ) = expr
+            && *nesting > 0
+        {
+            found = true;
+        }
+    });
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -969,19 +984,4 @@ mod tests {
         let expr = Expr::like(Expr::arg(0), Expr::arg(1));
         assert!(verify_expr_with(&Capability::SQLITE, &expr).is_none());
     }
-}
-
-/// Whether `query` reads a field or column of an enclosing statement's row.
-fn refers_to_enclosing_row(query: &stmt::Query) -> bool {
-    let mut found = false;
-    stmt::visit::for_each_expr(query, |expr| {
-        if let stmt::Expr::Reference(
-            stmt::ExprReference::Field { nesting, .. } | stmt::ExprReference::Model { nesting },
-        ) = expr
-            && *nesting > 0
-        {
-            found = true;
-        }
-    });
-    found
 }
