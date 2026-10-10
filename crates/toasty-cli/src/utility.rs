@@ -15,3 +15,10 @@ pub(crate) fn is_interactive() -> bool {
 
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
+
+/// Whether stdout is a terminal, as opposed to a pipe or a file.
+pub(crate) fn is_stdout_terminal() -> bool {
+    use std::io::IsTerminal;
+
+    std::io::stdout().is_terminal()
+}
