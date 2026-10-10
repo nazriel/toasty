@@ -300,3 +300,92 @@ fn rename_table_applies_to_a_filled_table() {
             .is_err()
     );
 }
+
+fn users_with_name(name_nullable: bool) -> Schema {
+    let mut name = make_column(0, 1, "name", Type::Text);
+    name.nullable = name_nullable;
+    Schema {
+        tables: vec![make_table(
+            0,
+            "users",
+            vec![make_column(0, 0, "id", Type::Integer(8)), name],
+            vec![],
+        )],
+    }
+}
+
+fn users_without_name() -> Schema {
+    Schema {
+        tables: vec![make_table(
+            0,
+            "users",
+            vec![make_column(0, 0, "id", Type::Integer(8))],
+            vec![],
+        )],
+    }
+}
+
+#[test]
+fn sqlite_refuses_add_column_not_null_only_once_the_table_has_rows() {
+    // Why a migration that adds a NOT NULL column cannot be tested on an
+    // empty table.
+    let connection = create_schema(&users_without_name());
+    connection
+        .execute("ALTER TABLE users ADD COLUMN a TEXT NOT NULL", [])
+        .unwrap();
+
+    connection
+        .execute("INSERT INTO users (id, a) VALUES (1, 'a')", [])
+        .unwrap();
+    let err = connection
+        .execute("ALTER TABLE users ADD COLUMN b TEXT NOT NULL", [])
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Cannot add a NOT NULL column with default value NULL"),
+        "got: {err}"
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "cannot add the column \"users\".\"name\": SQLite cannot add a NOT NULL column without a default value"
+)]
+fn add_column_not_null_is_rejected_before_it_reaches_a_filled_table() {
+    let from = users_without_name();
+    let connection = create_schema(&from);
+    connection
+        .execute("INSERT INTO users (id) VALUES (1), (2)", [])
+        .unwrap();
+
+    let _ = migrate(
+        &connection,
+        &from,
+        &users_with_name(false),
+        &diff::RenameHints::new(),
+    );
+}
+
+#[test]
+fn add_column_nullable_applies_to_a_filled_table() {
+    let from = users_without_name();
+    let connection = create_schema(&from);
+    connection
+        .execute("INSERT INTO users (id) VALUES (1), (2)", [])
+        .unwrap();
+
+    migrate(
+        &connection,
+        &from,
+        &users_with_name(true),
+        &diff::RenameHints::new(),
+    )
+    .unwrap();
+
+    let nulls: i64 = connection
+        .query_row("SELECT COUNT(*) FROM users WHERE name IS NULL", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(nulls, 2);
+}

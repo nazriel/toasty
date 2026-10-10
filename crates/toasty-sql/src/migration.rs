@@ -1,7 +1,7 @@
 use std::{borrow::Cow, collections::HashSet};
 
 use toasty_core::{
-    driver::Capability,
+    driver::{Capability, Dialect},
     schema::{
         db::{Column, Schema, Table, TableId, Type, TypeEnum},
         diff,
@@ -46,6 +46,25 @@ fn is_named_enum_type_only_change(
             Some(TypeEnum { name: Some(b), .. }),
         ) if a == b || renamed_types.contains(&(a.as_str(), b.as_str()))
     )
+}
+
+/// Panics if `column` cannot be added to `table` on a database that already
+/// has rows in it.
+///
+/// SQLite refuses `ALTER TABLE ... ADD COLUMN ... NOT NULL` without a non-null
+/// `DEFAULT` once the table has a row, and a table rebuild fails the same way
+/// when it copies those rows. The schema carries no column defaults, so the
+/// only correct migration is one the user writes. Auto-increment columns are
+/// left to the serializer.
+fn assert_column_can_be_added(table: &Table, column: &Column, capability: &Capability) {
+    if capability.sql == Some(Dialect::Sqlite) && !column.nullable && !column.auto_increment {
+        panic!(
+            "cannot add the column \"{}\".\"{}\": SQLite cannot add a NOT NULL column without a \
+             default value to a table that has rows. Add the column as nullable (an `Option` \
+             field), or write this migration by hand and give the column a non-null DEFAULT.",
+            table.name, column.name,
+        );
+    }
 }
 
 /// A migration step pairing a DDL [`Statement`] with the [`Schema`] it applies against.
@@ -145,6 +164,12 @@ impl<'a> MigrationStatement<'a> {
                     indices,
                     ..
                 } => {
+                    for item in columns.iter() {
+                        if let diff::Column::Add(column) = item {
+                            assert_column_can_be_added(next, column, capability);
+                        }
+                    }
+
                     let mut schema = Cow::Borrowed(schema_diff.previous());
                     if previous.name != next.name {
                         result.push(Self::new(

@@ -254,6 +254,14 @@ trigger a rebuild. Adding or dropping a column uses the corresponding
 `ALTER TABLE` form when no type-changing alterations are present in
 the same diff.
 
+**SQLite cannot add a `NOT NULL` column to a table that has rows**
+unless the column has a non-null default, and Toasty does not
+generate column defaults. The generator refuses such a migration
+with an error naming the table and column, rather than emit one
+that fails as soon as the table has a row. Add the field as an
+`Option`, or write the migration by hand and give the column a
+`DEFAULT`.
+
 The migration tooling does not yet manage zero-downtime online
 migrations.
 

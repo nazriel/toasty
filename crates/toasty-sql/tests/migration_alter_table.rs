@@ -138,14 +138,13 @@ fn rename_table_and_add_column() {
             vec![make_column(0, 0, "id", Type::Integer(8))],
         )],
     };
+    let mut email = make_column(0, 1, "email", Type::Text);
+    email.nullable = true;
     let to = Schema {
         tables: vec![make_table(
             0,
             "accounts",
-            vec![
-                make_column(0, 0, "id", Type::Integer(8)),
-                make_column(0, 1, "email", Type::Text),
-            ],
+            vec![make_column(0, 0, "id", Type::Integer(8)), email],
         )],
     };
 
@@ -160,7 +159,7 @@ fn rename_table_and_add_column() {
     assert_eq!(sql[0], "ALTER TABLE \"users\" RENAME TO \"accounts\";");
     assert_eq!(
         sql[1],
-        "ALTER TABLE \"accounts\" ADD COLUMN \"email\" TEXT NOT NULL;"
+        "ALTER TABLE \"accounts\" ADD COLUMN \"email\" TEXT;"
     );
 }
 

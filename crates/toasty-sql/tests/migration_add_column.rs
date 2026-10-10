@@ -86,13 +86,13 @@ fn add_column_sql(new_col: Column, capability: &Capability, flavor: &str) -> Str
 }
 
 #[test]
+#[should_panic(
+    expected = "cannot add the column \"users\".\"name\": SQLite cannot add a NOT NULL column without a default value"
+)]
 fn add_column_not_null_sqlite() {
+    // SQLite refuses this `ADD COLUMN` once the table has a row.
     let col = make_column(0, 1, "name", Type::Text);
-    let sql = add_column_sql(col, &Capability::SQLITE, "sqlite");
-    assert_eq!(
-        sql,
-        "ALTER TABLE \"users\" ADD COLUMN \"name\" TEXT NOT NULL;"
-    );
+    add_column_sql(col, &Capability::SQLITE, "sqlite");
 }
 
 #[test]
@@ -169,15 +169,15 @@ fn add_multiple_columns() {
             vec![make_column(0, 0, "id", Type::Integer(8))],
         )],
     };
+    let mut name = make_column(0, 1, "name", Type::Text);
+    name.nullable = true;
+    let mut email = make_column(0, 2, "email", Type::Text);
+    email.nullable = true;
     let to = Schema {
         tables: vec![make_table(
             0,
             "users",
-            vec![
-                make_column(0, 0, "id", Type::Integer(8)),
-                make_column(0, 1, "name", Type::Text),
-                make_column(0, 2, "email", Type::Text),
-            ],
+            vec![make_column(0, 0, "id", Type::Integer(8)), name, email],
         )],
     };
 
@@ -200,16 +200,15 @@ fn add_column_after_reordering_tables() {
             make_table(1, "posts", vec![make_column(1, 0, "id", Type::Integer(8))]),
         ],
     };
+    let mut name = make_column(1, 1, "name", Type::Text);
+    name.nullable = true;
     let to = Schema {
         tables: vec![
             make_table(0, "posts", vec![make_column(0, 0, "id", Type::Integer(8))]),
             make_table(
                 1,
                 "users",
-                vec![
-                    make_column(1, 0, "id", Type::Integer(8)),
-                    make_column(1, 1, "name", Type::Text),
-                ],
+                vec![make_column(1, 0, "id", Type::Integer(8)), name],
             ),
         ],
     };
@@ -219,8 +218,65 @@ fn add_column_after_reordering_tables() {
     let stmts = MigrationStatement::from_diff(&diff, &Capability::SQLITE);
     let sql = serialize_migration(&stmts, "sqlite");
 
+    assert_eq!(sql, ["ALTER TABLE \"users\" ADD COLUMN \"name\" TEXT;"]);
+}
+
+#[test]
+#[should_panic(
+    expected = "cannot add the column \"users\".\"name\": SQLite cannot add a NOT NULL column without a default value"
+)]
+fn add_column_not_null_with_table_recreation_sqlite() {
+    // The rebuild could create the column, but copying the existing rows
+    // into it fails the same way.
+    let mut id = make_column(0, 0, "id", Type::Integer(8));
+    id.storage_ty = Type::Integer(4);
+    let from = Schema {
+        tables: vec![make_table(0, "users", vec![id])],
+    };
+    let to = Schema {
+        tables: vec![make_table(
+            0,
+            "users",
+            vec![
+                make_column(0, 0, "id", Type::Integer(8)),
+                make_column(0, 1, "name", Type::Text),
+            ],
+        )],
+    };
+
+    let hints = diff::RenameHints::new();
+    let diff = diff::Schema::from(&from, &to, &hints);
+    MigrationStatement::from_diff(&diff, &Capability::SQLITE);
+}
+
+#[test]
+fn add_column_nullable_with_table_recreation_sqlite() {
+    let mut id = make_column(0, 0, "id", Type::Integer(8));
+    id.storage_ty = Type::Integer(4);
+    let from = Schema {
+        tables: vec![make_table(0, "users", vec![id])],
+    };
+    let mut name = make_column(0, 1, "name", Type::Text);
+    name.nullable = true;
+    let to = Schema {
+        tables: vec![make_table(
+            0,
+            "users",
+            vec![make_column(0, 0, "id", Type::Integer(8)), name],
+        )],
+    };
+
+    let hints = diff::RenameHints::new();
+    let diff = diff::Schema::from(&from, &to, &hints);
+    let stmts = MigrationStatement::from_diff(&diff, &Capability::SQLITE);
+    let sql = serialize_migration(&stmts, "sqlite");
+
     assert_eq!(
-        sql,
-        ["ALTER TABLE \"users\" ADD COLUMN \"name\" TEXT NOT NULL;"]
+        sql[1],
+        "CREATE TABLE \"_toasty_new_users\" (\n    \"id\" BIGINT NOT NULL,\n    \"name\" TEXT,\n    PRIMARY KEY (\"id\")\n);"
+    );
+    assert_eq!(
+        sql[2],
+        "INSERT INTO \"_toasty_new_users\" (\"id\") SELECT \"id\" FROM \"users\";"
     );
 }
