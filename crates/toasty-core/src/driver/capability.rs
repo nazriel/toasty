@@ -71,6 +71,11 @@ pub struct Capability {
     /// not atomic relative to concurrent writers.
     pub returning_from_update: bool,
 
+    /// SQL: whether the backend accepts `RETURNING` on `DELETE`. When
+    /// `false`, a delete that asks for the removed records is rejected with
+    /// `unsupported_feature`; counting the removed records works either way.
+    pub returning_from_delete: bool,
+
     /// Whether an upsert may target the table's primary key.
     ///
     /// When `false`, the verifier returns `unsupported_feature` before
@@ -667,6 +672,7 @@ impl Capability {
         select_for_update: false,
         returning_from_insert: true,
         returning_from_update: true,
+        returning_from_delete: true,
         upsert_primary_key: true,
         upsert_unique: true,
         upsert_branch_assignments: true,
@@ -839,6 +845,7 @@ impl Capability {
         select_for_update: true,
         returning_from_insert: false,
         returning_from_update: false,
+        returning_from_delete: false,
         upsert_primary_key: false,
         upsert_unique: false,
         upsert_branch_assignments: false,
@@ -935,6 +942,7 @@ impl Capability {
         select_for_update: false,
         returning_from_insert: false,
         returning_from_update: false,
+        returning_from_delete: false,
         upsert_primary_key: true,
         upsert_unique: false,
         upsert_branch_assignments: false,

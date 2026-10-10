@@ -213,6 +213,20 @@ impl stmt::Visit for Verify<'_, '_> {
     fn visit_stmt_delete(&mut self, i: &stmt::Delete) {
         stmt::visit::visit_stmt_delete(self, i);
 
+        // Reading the removed records back needs `DELETE ... RETURNING`. A
+        // returning that reads no column (an empty record per removed row,
+        // which is how the removed records are counted) is served from the
+        // affected-row count, so every driver accepts it.
+        if let Some(returning) = &i.returning
+            && !is_empty_record_returning(returning)
+            && !self.capability.returning_from_delete
+        {
+            self.record(Error::unsupported_feature(format!(
+                "{} does not support returning deleted records",
+                self.capability.driver_name
+            )));
+        }
+
         VerifyExpr {
             schema: self.schema,
             model: i.from.model_id_unwrap(),
@@ -751,6 +765,12 @@ fn rhs_is_concrete_list(expr: &stmt::Expr) -> bool {
             .all(|item| matches!(item, stmt::Expr::Value(_))),
         _ => false,
     }
+}
+
+/// Whether `returning` projects an empty record: one value per affected row
+/// that reads no column.
+fn is_empty_record_returning(returning: &stmt::Returning) -> bool {
+    matches!(returning, stmt::Returning::Project(stmt::Expr::Record(record)) if record.fields.is_empty())
 }
 
 #[cfg(test)]

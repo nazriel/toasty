@@ -11,6 +11,7 @@ pub mod crud_batch_create;
 pub mod crud_composite_key_in_list;
 pub mod crud_composite_key_pagination;
 pub mod crud_create_macro;
+pub mod crud_delete_results;
 pub mod crud_driver_ops;
 pub mod crud_model_find_by_primary_key;
 pub mod crud_model_level_key;

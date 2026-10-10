@@ -1404,9 +1404,9 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
         }
 
         // A `RETURNING` on the write (e.g. a relative `value = value + 1` read
-        // back) means the caller wants the changed rows; otherwise the write
-        // just reports how many rows it touched. Only an UPDATE reads columns
-        // back — a DELETE never has a returning.
+        // back, or a DELETE asked for the records it removed) means the caller
+        // wants the written rows; otherwise the write just reports how many
+        // rows it touched.
         let returning_len = match write.returning() {
             Some(stmt::Returning::Project(stmt::Expr::Record(record))) => record.fields.len(),
             Some(returning) => todo!("unexpected conditional write returning={returning:#?}"),

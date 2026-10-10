@@ -108,6 +108,50 @@ User::filter_by_email("alice@example.com")
 You can use any query builder — `filter_by_*`, `filter()`, or `all()` — and
 chain `.delete()` to convert it into a delete operation.
 
+## What a query delete removed
+
+A delete's `.exec()` returns `()`. To learn what the delete removed,
+call one of these instead:
+
+- `.exec_count(&mut db)` returns the number of records removed.
+- `.exec_returning(&mut db)` returns the removed records, with the
+  values they had.
+
+```rust
+# use toasty::Model;
+# #[derive(Debug, toasty::Model)]
+# struct User {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     #[index]
+#     name: String,
+# }
+# async fn __example(mut db: toasty::Db) -> toasty::Result<()> {
+let removed = User::filter_by_name("Alice")
+    .delete()
+    .exec_count(&mut db)
+    .await?;
+println!("removed {removed} users");
+
+let removed: Vec<User> = User::filter_by_name("Bob")
+    .delete()
+    .exec_returning(&mut db)
+    .await?;
+# Ok(())
+# }
+```
+
+Both run a single `DELETE` and report what it removed, not what matched
+before it ran. A filter that matches nothing returns `0` or an empty
+`Vec`, not an error. Inside a transaction they see the transaction's
+own writes.
+
+`.exec_count()` works on every database. `.exec_returning()` needs
+`DELETE ... RETURNING`, which SQLite and PostgreSQL have; on MySQL,
+MariaDB and DynamoDB it returns an `unsupported_feature` error without
+deleting anything.
+
 ## What gets generated
 
 For a model with `#[key]` on `id` and `#[unique]` on `email`, Toasty generates:

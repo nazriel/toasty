@@ -55,7 +55,10 @@ mod path;
 pub use path::Path;
 
 pub use crate::schema::Auto;
-use crate::{Executor, schema::Load};
+use crate::{
+    Executor,
+    schema::{Load, Model},
+};
 
 mod query;
 pub use query::Query;
@@ -249,6 +252,39 @@ impl<M> fmt::Debug for Statement<M> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.untyped.fmt(fmt)
     }
+}
+
+/// Execute a mutation and count the records it affected.
+///
+/// The statement's returning clause becomes an empty record: one value per
+/// affected record that reads no column. The engine answers it from the
+/// driver's affected-row count, so this works on every driver, including
+/// those without `RETURNING`.
+pub(crate) async fn exec_count(
+    executor: &mut dyn Executor,
+    mut untyped: stmt::Statement,
+) -> crate::Result<u64> {
+    untyped.set_returning(stmt::Returning::Project(stmt::Expr::record_from_vec(
+        vec![],
+    )));
+    let response = executor.exec_untyped(untyped).await?;
+    match response.values.collect_as_value().await? {
+        stmt::Value::List(rows) => Ok(rows.len() as u64),
+        value => Err(toasty_core::Error::invalid_result(format!(
+            "expected one value per affected record, got {value:?}"
+        ))),
+    }
+}
+
+/// Execute a mutation and load the records it affected as `M`.
+pub(crate) async fn exec_returning<M: Model>(
+    executor: &mut dyn Executor,
+    mut untyped: stmt::Statement,
+) -> crate::Result<Vec<M>> {
+    untyped.set_returning(stmt::Returning::Model { include: vec![] });
+    executor
+        .exec(Statement::<List<M>>::from_untyped_stmt(untyped))
+        .await
 }
 
 /// Returns an expression that tests whether `lhs` is contained in `rhs`.

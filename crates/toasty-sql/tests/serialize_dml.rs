@@ -343,15 +343,10 @@ fn delete_with_where() {
 }
 
 /// MySQL has no `RETURNING` clause for any DML statement, so the serializer
-/// must reject a `DELETE ... RETURNING` on this flavor.
-///
-/// The panic today comes from the unconditional `assert!(returning.is_none())`
-/// in the Delete serializer, so the message is the assert text — once the
-/// serializer learns to emit RETURNING for PG/SQLite (see #[ignore]'d tests
-/// below), the MySQL branch should become an explicit panic mirroring INSERT
-/// and UPDATE, and this `expected` substring should track it.
+/// must reject a `DELETE ... RETURNING` on this flavor, as it does for INSERT
+/// and UPDATE.
 #[test]
-#[should_panic(expected = "self.returning.is_none()")]
+#[should_panic(expected = "MySQL does not support the RETURNING clause with DELETE")]
 fn delete_with_returning_panics_on_mysql() {
     let schema = users_schema();
     let returning = Some(Returning::Project(Expr::record([col(0, 0)])));
@@ -359,34 +354,31 @@ fn delete_with_returning_panics_on_mysql() {
 }
 
 // PostgreSQL has supported `DELETE ... RETURNING` since 8.2; SQLite since
-// 3.35. The serializer currently asserts `returning.is_none()` unconditionally
-// in `impl ToSql for &stmt::Delete`, so the tests below would panic today —
-// they are `#[ignore]`'d and pin the expected behavior once the serializer is
-// taught to emit `RETURNING` for these flavors (mirroring the existing pattern
-// for INSERT/UPDATE).
+// 3.35. SQLite does not resolve the table alias inside `RETURNING`, so the
+// returned columns are written unqualified while the filter keeps the alias.
 
-#[ignore = "DELETE+RETURNING is not yet implemented; serializer panics unconditionally"]
 #[test]
 fn delete_with_returning_postgresql() {
     let schema = users_schema();
     let returning = Some(Returning::Project(Expr::record([col(0, 0)])));
-    // Expected string stays empty — will be populated when the serializer
-    // learns to emit DELETE+RETURNING.
-    expect![[r#""#]].assert_eq(&render(
+    expect![[
+        r#"DELETE FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" = 1 RETURNING "id" AS column1;"#
+    ]]
+    .assert_eq(&render(
         Flavor::Postgresql,
         &schema,
         delete_stmt(true, returning),
     ));
 }
 
-#[ignore = "DELETE+RETURNING is not yet implemented; serializer panics unconditionally"]
 #[test]
 fn delete_with_returning_sqlite() {
     let schema = users_schema();
     let returning = Some(Returning::Project(Expr::record([col(0, 0)])));
-    // Expected string stays empty — will be populated when the serializer
-    // learns to emit DELETE+RETURNING.
-    expect![[r#""#]].assert_eq(&render(
+    expect![[
+        r#"DELETE FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" = 1 RETURNING "id" AS column1;"#
+    ]]
+    .assert_eq(&render(
         Flavor::Sqlite,
         &schema,
         delete_stmt(true, returning),

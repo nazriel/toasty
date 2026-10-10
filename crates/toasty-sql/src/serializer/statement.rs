@@ -302,8 +302,6 @@ impl ToSql for &stmt::RenameType {
 
 impl ToSql for &stmt::Delete {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
-        assert!(self.returning.is_none());
-
         // Conditions never reach the serializer: the planner rewrites a
         // conditional DELETE into a CTE or read-modify-write plan (see
         // `plan_conditional_sql_query_as_*`), stripping the condition and
@@ -314,11 +312,28 @@ impl ToSql for &stmt::Delete {
             self.condition
         );
 
+        let returning = self
+            .returning
+            .as_ref()
+            .map(|returning| (" RETURNING ", returning));
+
+        if returning.is_some() && f.serializer.is_mysql() {
+            panic!(
+                "MySQL does not support the RETURNING clause with DELETE statements; returning={returning:#?}"
+            );
+        }
+
         // Create a new expression scope to serialize the statement
         let mut f = f.scope(self);
         f.alias = true;
 
         fmt!(&mut f, "DELETE FROM " self.from self.filter);
+
+        // SQLite does not resolve the table alias inside `RETURNING`, so the
+        // returned columns are written unqualified, as an UPDATE writes them.
+        // A RETURNING clause can only name columns of the deleted table.
+        f.alias = false;
+        fmt!(&mut f, returning);
     }
 }
 
