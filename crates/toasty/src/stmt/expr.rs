@@ -1,7 +1,7 @@
 use super::{Insert, IntoExpr, List};
 use std::marker::PhantomData;
 use std::ops::Not;
-use toasty_core::stmt;
+use toasty_core::stmt::{self, Direction, OrderByExpr};
 
 /// A typed expression in the Toasty query language.
 ///
@@ -112,6 +112,25 @@ impl<T> Expr<T> {
     pub fn le(self, rhs: impl IntoExpr<T>) -> Expr<bool> {
         let rhs = rhs.into_expr().untyped;
         Expr::from_untyped(stmt::Expr::le(self.untyped, rhs))
+    }
+
+    /// Produce an ascending [`OrderByExpr`] for this expression, such as the
+    /// value of a related record from [`Query::value_for`](super::Query::value_for).
+    pub fn asc(self) -> OrderByExpr {
+        OrderByExpr {
+            expr: self.untyped,
+            order: Some(Direction::Asc),
+            nulls: None,
+        }
+    }
+
+    /// Produce a descending [`OrderByExpr`] for this expression.
+    pub fn desc(self) -> OrderByExpr {
+        OrderByExpr {
+            expr: self.untyped,
+            order: Some(Direction::Desc),
+            nulls: None,
+        }
     }
 }
 

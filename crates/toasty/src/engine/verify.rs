@@ -242,6 +242,7 @@ impl stmt::Visit for Verify<'_, '_> {
         stmt::visit::visit_stmt_query(self, i);
 
         self.verify_single_query(i);
+        self.verify_order_by(i);
         self.verify_offset_key_matches_order_by(i);
         self.verify_limit_is_integer_literal(i);
     }
@@ -317,6 +318,44 @@ impl Verify<'_, '_> {
     fn record(&mut self, err: Error) {
         if self.error.is_none() {
             *self.error = Some(err);
+        }
+    }
+
+    /// `NULLS FIRST` / `NULLS LAST` and an ordering by a related record's
+    /// value are SQL. A related value also has no column to read a cursor
+    /// from, so it orders an offset page but not a cursor page.
+    fn verify_order_by(&mut self, i: &stmt::Query) {
+        let Some(order_by) = i.order_by.as_ref() else {
+            return;
+        };
+
+        let has_nulls = order_by.exprs.iter().any(|expr| expr.nulls.is_some());
+        let has_subquery = order_by
+            .exprs
+            .iter()
+            .any(|expr| matches!(expr.expr, stmt::Expr::Stmt(_)));
+
+        if !self.capability.sql() {
+            if has_nulls {
+                self.record(Error::unsupported_feature(format!(
+                    "{} does not support placing NULL values in an ordering (nulls_first / nulls_last)",
+                    self.capability.driver_name
+                )));
+            }
+            if has_subquery {
+                self.record(Error::unsupported_feature(format!(
+                    "{} does not support ordering by a value of a related record",
+                    self.capability.driver_name
+                )));
+            }
+            return;
+        }
+
+        if has_subquery && matches!(i.limit, Some(stmt::Limit::Cursor(_))) {
+            self.record(Error::unsupported_feature(
+                "cursor-based pagination cannot order by a value of a related record; \
+                 use limit and offset instead",
+            ));
         }
     }
 
@@ -702,6 +741,22 @@ impl stmt::Visit for VerifyExpr<'_, '_> {
         }
     }
 
+    fn visit_expr_stmt(&mut self, i: &stmt::ExprStmt) {
+        // A query that refers to the row of the statement it is used in
+        // (`Query::value_for`) is evaluated by the database only where it
+        // orders that statement.
+        if let Statement::Query(query) = &*i.stmt
+            && refers_to_enclosing_row(query)
+        {
+            self.record(Error::unsupported_feature(
+                "a value of a related record can only be used in order_by",
+            ));
+            return;
+        }
+
+        stmt::visit::visit_expr_stmt(self, i);
+    }
+
     fn visit_expr_in_subquery(&mut self, i: &stmt::ExprInSubquery) {
         // stmt::visit::visit_expr_in_subquery(self, i);
 
@@ -914,4 +969,19 @@ mod tests {
         let expr = Expr::like(Expr::arg(0), Expr::arg(1));
         assert!(verify_expr_with(&Capability::SQLITE, &expr).is_none());
     }
+}
+
+/// Whether `query` reads a field or column of an enclosing statement's row.
+fn refers_to_enclosing_row(query: &stmt::Query) -> bool {
+    let mut found = false;
+    stmt::visit::for_each_expr(query, |expr| {
+        if let stmt::Expr::Reference(
+            stmt::ExprReference::Field { nesting, .. } | stmt::ExprReference::Model { nesting },
+        ) = expr
+            && *nesting > 0
+        {
+            found = true;
+        }
+    });
+    found
 }

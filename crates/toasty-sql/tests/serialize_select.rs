@@ -222,6 +222,7 @@ fn select_with_order_by_asc() {
         exprs: vec![OrderByExpr {
             expr: col(0, 0),
             order: Some(Direction::Asc),
+            nulls: None,
         }],
     };
     let stmt = make_query(Filter::ALL, Some(order_by), None, vec![]);
@@ -238,6 +239,7 @@ fn select_with_order_by_desc() {
         exprs: vec![OrderByExpr {
             expr: col(0, 0),
             order: Some(Direction::Desc),
+            nulls: None,
         }],
     };
     let stmt = make_query(Filter::ALL, Some(order_by), None, vec![]);
@@ -255,15 +257,56 @@ fn select_with_order_by_multiple_columns() {
             OrderByExpr {
                 expr: col(0, 1),
                 order: Some(Direction::Asc),
+                nulls: None,
             },
             OrderByExpr {
                 expr: col(0, 0),
                 order: Some(Direction::Desc),
+                nulls: None,
             },
         ],
     };
     let stmt = make_query(Filter::ALL, Some(order_by), None, vec![]);
     expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY tbl_0_0."name" ASC, tbl_0_0."id" DESC;"#]].assert_eq(&render(Flavor::Sqlite, &schema, stmt));
+}
+
+/// `ORDER BY name <direction> NULLS <placement>` for `flavor`.
+fn render_nulls(flavor: Flavor, direction: Direction, nulls: stmt::Nulls) -> String {
+    let schema = users_schema();
+    let order_by = OrderBy {
+        exprs: vec![OrderByExpr {
+            expr: col(0, 1),
+            order: Some(direction),
+            nulls: Some(nulls),
+        }],
+    };
+    render(
+        flavor,
+        &schema,
+        make_query(Filter::ALL, Some(order_by), None, vec![]),
+    )
+}
+
+#[test]
+fn select_with_order_by_nulls_last() {
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY tbl_0_0."name" ASC NULLS LAST;"#]]
+        .assert_eq(&render_nulls(Flavor::Sqlite, Direction::Asc, stmt::Nulls::Last));
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY tbl_0_0."name" DESC NULLS LAST;"#]]
+        .assert_eq(&render_nulls(Flavor::Postgresql, Direction::Desc, stmt::Nulls::Last));
+    // MySQL has no `NULLS LAST`: a leading `IS NULL` key puts the nulls after
+    // the values.
+    expect!["SELECT tbl_0_0.`id` AS column_0 FROM `users` AS tbl_0_0 ORDER BY tbl_0_0.`name` IS NULL, tbl_0_0.`name` ASC;"]
+        .assert_eq(&render_nulls(Flavor::Mysql, Direction::Asc, stmt::Nulls::Last));
+}
+
+#[test]
+fn select_with_order_by_nulls_first() {
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY tbl_0_0."name" DESC NULLS FIRST;"#]]
+        .assert_eq(&render_nulls(Flavor::Sqlite, Direction::Desc, stmt::Nulls::First));
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY tbl_0_0."name" ASC NULLS FIRST;"#]]
+        .assert_eq(&render_nulls(Flavor::Postgresql, Direction::Asc, stmt::Nulls::First));
+    expect!["SELECT tbl_0_0.`id` AS column_0 FROM `users` AS tbl_0_0 ORDER BY tbl_0_0.`name` IS NOT NULL, tbl_0_0.`name` DESC;"]
+        .assert_eq(&render_nulls(Flavor::Mysql, Direction::Desc, stmt::Nulls::First));
 }
 
 #[test]

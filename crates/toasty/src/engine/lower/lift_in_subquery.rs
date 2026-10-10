@@ -157,6 +157,27 @@ impl VisitMut for LiftInSubquery<'_> {
         }
     }
 
+    fn visit_stmt_query_mut(&mut self, stmt: &mut stmt::Query) {
+        if let Some(with) = &mut stmt.with {
+            self.visit_with_mut(with);
+        }
+
+        self.visit_expr_set_mut(&mut stmt.body);
+
+        // `ORDER BY` reads the rows of the body, so a subquery in it (a value
+        // of a related record) resolves its references to the enclosing row
+        // against the body's source.
+        let mut s = self.scope(&stmt.body);
+
+        if let Some(order_by) = &mut stmt.order_by {
+            s.visit_order_by_mut(order_by);
+        }
+
+        if let Some(limit) = &mut stmt.limit {
+            s.visit_limit_mut(limit);
+        }
+    }
+
     fn visit_stmt_select_mut(&mut self, stmt: &mut stmt::Select) {
         self.visit_source_mut(&mut stmt.source);
 

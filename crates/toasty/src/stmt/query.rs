@@ -637,6 +637,70 @@ impl<M: Model> Query<List<M>> {
     pub fn latest_by<U>(self, field: Path<M, U>) -> Self {
         self.order_by(field.desc())
     }
+
+    /// Use this query as a value of the record that an enclosing query is
+    /// reading: `field` of the record this query selects whose `key` equals
+    /// the enclosing record's `outer`, or `None` when there is none.
+    ///
+    /// The result is a correlated scalar subquery, `(SELECT field FROM ...
+    /// WHERE key = outer AND <this query's filter>)`, which can be passed to
+    /// [`Expr::asc`] or [`Expr::desc`] to order the enclosing query by a
+    /// value stored in another table. Every value in the filter is a bound
+    /// parameter, so the record to read can be chosen at run time. The
+    /// filter must select at most one record for each enclosing record; when
+    /// it selects more, SQLite reads the first it finds, while PostgreSQL and
+    /// MySQL fail the query.
+    ///
+    /// Supported on SQL databases, in `order_by`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(Debug, toasty::Model)]
+    /// # struct User {
+    /// #     #[key]
+    /// #     id: i64,
+    /// #     name: String,
+    /// # }
+    /// # #[derive(Debug, toasty::Model)]
+    /// # struct Setting {
+    /// #     #[key]
+    /// #     id: i64,
+    /// #     user_id: i64,
+    /// #     key: String,
+    /// #     value: String,
+    /// # }
+    /// use toasty::stmt::{List, Query};
+    ///
+    /// // Each user's "theme" setting, `None` for a user without one.
+    /// let theme = Query::<List<Setting>>::all()
+    ///     .filter(Setting::fields().key().eq("theme"))
+    ///     .value_for(
+    ///         Setting::fields().value(),
+    ///         Setting::fields().user_id(),
+    ///         User::fields().id(),
+    ///     );
+    ///
+    /// let q = User::all().order_by(theme.asc().nulls_last());
+    /// ```
+    pub fn value_for<O, K, U>(
+        mut self,
+        field: Path<M, U>,
+        key: Path<M, K>,
+        outer: Path<O, K>,
+    ) -> Expr<Option<U>> {
+        // The subquery is one scope inside the query that uses it, so the
+        // enclosing record is at nesting 1.
+        let correlation = stmt::Expr::eq(
+            key.untyped.into_stmt(),
+            outer.untyped.into_stmt_with_nesting(1),
+        );
+        self.untyped.add_filter(correlation);
+        *self.untyped.returning_mut_unwrap() = Returning::Project(field.untyped.into_stmt());
+        self.untyped.single = true;
+
+        Expr::from_untyped(stmt::Expr::stmt(self.untyped))
+    }
 }
 
 impl<T> IntoStatement for Query<T> {

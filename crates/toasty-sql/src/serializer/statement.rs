@@ -539,10 +539,32 @@ impl ToSql for &stmt::OrderBy {
 
 impl ToSql for &stmt::OrderByExpr {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
+        // MySQL and MariaDB have no `NULLS FIRST` / `NULLS LAST`. A leading
+        // `<expr> IS NULL` key (0 for a value, 1 for `NULL`) orders the two
+        // groups first, with the same result.
+        if let Some(nulls) = self.nulls
+            && f.serializer.is_mysql()
+        {
+            let null_key = match nulls {
+                stmt::Nulls::First => " IS NOT NULL, ",
+                stmt::Nulls::Last => " IS NULL, ",
+            };
+            fmt!(f, self.expr null_key);
+        }
+
         if let Some(order) = &self.order {
             fmt!(f, self.expr " " order);
         } else {
             fmt!(f, self.expr);
+        }
+
+        if let Some(nulls) = self.nulls
+            && !f.serializer.is_mysql()
+        {
+            match nulls {
+                stmt::Nulls::First => fmt!(f, " NULLS FIRST"),
+                stmt::Nulls::Last => fmt!(f, " NULLS LAST"),
+            }
         }
     }
 }

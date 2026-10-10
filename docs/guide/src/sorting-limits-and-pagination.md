@@ -99,6 +99,107 @@ let items = Item::filter(Item::fields().category().eq("books"))
 # }
 ```
 
+### Placing `NULL` values
+
+Where `NULL` values of a nullable field land depends on the database:
+SQLite and MySQL sort them before every other value, PostgreSQL after them,
+and a descending order reverses either. Call `.nulls_last()` or
+`.nulls_first()` on an ordering expression to choose, in either direction and
+on every SQL database:
+
+```rust
+# use toasty::Model;
+# #[derive(Debug, toasty::Model)]
+# struct Task {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     title: String,
+#     priority: Option<i64>,
+# }
+# async fn __example(mut db: toasty::Db) -> toasty::Result<()> {
+// Highest priority first; tasks without a priority at the end
+let tasks = Task::all()
+    .order_by(Task::fields().priority().desc().nulls_last())
+    .exec(&mut db)
+    .await?;
+# Ok(())
+# }
+```
+
+SQLite and PostgreSQL write it as `NULLS LAST` / `NULLS FIRST`. MySQL and
+MariaDB have no such clause, so Toasty adds a leading `<field> IS NULL` (or
+`IS NOT NULL`) key to the ordering, which produces the same order. Cursor
+pagination follows the chosen placement. DynamoDB orders by its sort key alone
+and rejects a placement with an unsupported-feature error.
+
+### Sorting by a value of a related record
+
+A value that lives in another table, such as a user's setting in a table of
+settings, can order a query. `Query::value_for` turns a query of the other
+model into that value: the field of the record whose key matches the record
+being sorted, or `None` when there is none. Order by it with `.asc()` or
+`.desc()`, like a field:
+
+```rust
+# use toasty::Model;
+# #[derive(Debug, toasty::Model)]
+# struct User {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     name: String,
+# }
+# #[derive(Debug, toasty::Model)]
+# struct Setting {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     user_id: u64,
+#     key: String,
+#     value: String,
+# }
+# async fn __example(mut db: toasty::Db) -> toasty::Result<()> {
+use toasty::stmt::{List, Query};
+
+// Each user's "theme" setting
+let theme = Query::<List<Setting>>::all()
+    .filter(Setting::fields().key().eq("theme"))
+    .value_for(
+        Setting::fields().value(),   // the value to sort by
+        Setting::fields().user_id(), // the setting's reference to its user...
+        User::fields().id(),         // ...matching the sorted user's key
+    );
+
+// Users by theme; users without one at the end, then by name
+let users = User::all()
+    .order_by((theme.asc().nulls_last(), User::fields().name().asc()))
+    .exec(&mut db)
+    .await?;
+# Ok(())
+# }
+```
+
+The value is a correlated subquery that the database evaluates for each row:
+
+```sql
+SELECT ... FROM users
+ORDER BY (SELECT value FROM settings
+          WHERE key = $1 AND user_id = users.id) ASC NULLS LAST,
+         name ASC
+```
+
+Every value in the filter is a bound parameter, so which value to sort by can
+be chosen at run time. The filter must select at most one record for each
+sorted record: when it selects more, SQLite uses the first it finds, while
+PostgreSQL and MySQL fail the query. Combine it with `.nulls_last()` or
+`.nulls_first()`, since a record without a match sorts as `NULL`.
+
+Sorting by a related value works on SQL databases with `.limit()` and
+`.offset()`. It is not available with cursor pagination, which has no column
+to read the next cursor from, nor in a filter, nor on DynamoDB; each of these
+is rejected with an unsupported-feature error.
+
 ## Limiting results
 
 `.limit(n)` caps the number of records returned:
@@ -363,6 +464,8 @@ Methods available on query builders:
 | `.order_by(field.asc())` | Sort ascending by field |
 | `.order_by(field.desc())` | Sort descending by field |
 | `.order_by((a.asc(), b.desc()))` | Sort by multiple fields; later fields are tie-breakers |
+| `.order_by(field.asc().nulls_last())` | Sort with `NULL` values last (or `.nulls_first()`) |
+| `.order_by(query.value_for(field, key, outer).asc())` | Sort by a value of a related record (SQL, offset pages) |
 | `.limit(n)` | Return at most `n` records |
 | `.offset(n)` | Skip first `n` records (requires `.limit()`) |
 | `.paginate(per_page)` | Cursor-based pagination (requires `.order_by()`) |

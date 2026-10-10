@@ -128,6 +128,7 @@ impl LoweringState<'_> {
             scope_id,
             cx: LoweringContext::Statement,
             collect_dependencies: &mut collect_dependencies,
+            inline_depth: 0,
         }
         .visit_stmt_mut(&mut stmt);
 
@@ -160,6 +161,13 @@ struct LowerStatement<'a, 'b> {
 
     /// Track dependencies here.
     collect_dependencies: &'a mut Option<IndexSet<hir::StmtId>>,
+
+    /// How many subqueries the database evaluates inside the current
+    /// statement enclose the expression being lowered (a correlated value in
+    /// `ORDER BY`). A column reference nested no deeper than this names a
+    /// row of the same SQL statement, so it stays a column reference instead
+    /// of becoming an argument loaded from another statement.
+    inline_depth: usize,
 }
 
 #[derive(Debug)]
@@ -647,6 +655,17 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
     }
 
     fn visit_order_by_expr_mut(&mut self, node: &mut stmt::OrderByExpr) {
+        // A value of a related record (`Query::value_for`) is a correlated
+        // scalar subquery that a SQL database evaluates itself, so it stays
+        // in the statement rather than becoming a separate one.
+        if self.capability().sql()
+            && let stmt::Expr::Stmt(expr_stmt) = &mut node.expr
+            && let stmt::Statement::Query(query) = &mut *expr_stmt.stmt
+        {
+            self.lower_scalar_subquery(query);
+            return;
+        }
+
         // First, run the default visitor to lower sub-expressions
         self.visit_expr_mut(&mut node.expr);
 
@@ -988,7 +1007,19 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
                     }
                     stmt::ExprReference::Model { .. } => todo!(),
                     stmt::ExprReference::Column(expr_column) => {
+                        // A row of an enclosing query of the same SQL
+                        // statement: the database resolves it.
+                        if expr_column.nesting > 0 && expr_column.nesting <= self.inline_depth {
+                            return;
+                        }
+
                         if expr_column.nesting > 0 {
+                            assert!(
+                                self.inline_depth == 0,
+                                "a subquery evaluated by the database cannot yet refer \
+                                 to a row of another statement; expr={expr_column:#?}"
+                            );
+
                             let source_id = self.scope_stmt_id();
                             let target_id = self.resolve_stmt_id(expr_column.nesting);
 
@@ -1780,6 +1811,37 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
 
     fn apply_lowering_filter_constraint(&self, _filter: &mut stmt::Filter) {}
 
+    /// Lowers a scalar subquery that the database evaluates as part of the
+    /// current statement, its references to the enclosing rows kept as
+    /// column references.
+    fn lower_scalar_subquery(&mut self, query: &mut stmt::Query) {
+        self.inline_depth += 1;
+        self.visit_stmt_query_mut(query);
+        self.inline_depth -= 1;
+
+        // The selected value is compared, not decoded: strip a decode cast
+        // (a value stored in another type than its field's, such as a date
+        // stored as text) the way `ORDER BY` does for a column, and unwrap
+        // the single-field record of an embedded newtype.
+        let stmt::ExprSet::Select(select) = &mut query.body else {
+            return;
+        };
+        let stmt::Returning::Project(value) = &mut select.returning else {
+            return;
+        };
+        while let stmt::Expr::Record(record) = value
+            && record.len() == 1
+        {
+            *value = record.fields.pop().unwrap();
+        }
+        let mut lhs = value.clone();
+        let mut rhs = value.take();
+        self.lower_expr_binary_op(stmt::BinaryOp::Eq, &mut lhs, &mut rhs);
+
+        // SQL projects a record of columns: the subquery selects one.
+        *value = stmt::Expr::record([lhs]);
+    }
+
     fn lower_expr_field(&self, nesting: usize, index: usize) -> stmt::Expr {
         match self.cx {
             LoweringContext::Statement
@@ -2058,6 +2120,7 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             scope_id,
             cx: LoweringContext::Statement,
             collect_dependencies: &mut dependencies,
+            inline_depth: 0,
         };
 
         f(&mut lower);
@@ -2077,6 +2140,7 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             scope_id: self.scope_id,
             cx: self.cx,
             collect_dependencies: self.collect_dependencies,
+            inline_depth: self.inline_depth,
         }
     }
 
@@ -2098,6 +2162,7 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             scope_id: self.scope_id,
             cx: LoweringContext::Insert(columns, None),
             collect_dependencies: self.collect_dependencies,
+            inline_depth: self.inline_depth,
         }
     }
 
@@ -2126,6 +2191,7 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             scope_id: self.scope_id,
             cx: LoweringContext::InsertRow(row),
             collect_dependencies: self.collect_dependencies,
+            inline_depth: self.inline_depth,
         }
     }
 
@@ -2136,6 +2202,7 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             scope_id: self.scope_id,
             cx: LoweringContext::Returning(None),
             collect_dependencies: self.collect_dependencies,
+            inline_depth: self.inline_depth,
         }
     }
 
@@ -2149,6 +2216,7 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             scope_id: self.scope_id,
             cx: LoweringContext::Returning(Some(row_index)),
             collect_dependencies: self.collect_dependencies,
+            inline_depth: self.inline_depth,
         }
     }
 

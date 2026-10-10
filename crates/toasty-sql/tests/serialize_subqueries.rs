@@ -6,6 +6,7 @@
 //! * `TableDerived` (a subquery used as a `FROM` factor)
 //! * `EXISTS` / `NOT EXISTS` predicates
 //! * `IN (subquery)` predicates
+//! * correlated scalar subqueries in `ORDER BY`
 //!
 //! Each test constructs the AST directly so the serializer is exercised in
 //! isolation — no lowering pipeline involved.
@@ -14,9 +15,9 @@ use expect_test::expect;
 use toasty_core::{
     schema::db::{Column, ColumnId, PrimaryKey, Schema, Table, TableId, Type as StorageType},
     stmt::{
-        self, Cte, Expr, ExprColumn, Filter, Insert, InsertTable, InsertTarget, Returning, Select,
-        Source, SourceTable, SourceTableId, TableDerived, TableFactor, TableRef, TableWithJoins,
-        Values, With,
+        self, Cte, Direction, Expr, ExprColumn, Filter, Insert, InsertTable, InsertTarget, Nulls,
+        OrderBy, OrderByExpr, Returning, Select, Source, SourceTable, SourceTableId, TableDerived,
+        TableFactor, TableRef, TableWithJoins, Values, With,
     },
 };
 use toasty_sql::{Serializer, Statement as SqlStatement};
@@ -358,4 +359,70 @@ fn expr_in_subquery() {
         select_users_with_filter(in_sub.clone()),
     ));
     expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" IN (SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0);"#]].assert_eq(&render_sqlite(&schema, select_users_with_filter(in_sub)));
+}
+
+// -----------------------------------------------------------------------------
+// Correlated scalar subquery in ORDER BY
+// -----------------------------------------------------------------------------
+
+/// `users(id)` and `settings(id, user_id, key, value)`.
+fn users_settings_schema() -> Schema {
+    Schema {
+        tables: vec![
+            make_table(0, "users", &[]),
+            make_table(1, "settings", &["user_id", "key", "value"]),
+        ],
+    }
+}
+
+/// `SELECT id FROM users ORDER BY (SELECT value FROM settings WHERE
+/// settings.user_id = users.id AND settings.key = $1) ASC NULLS LAST`.
+fn users_by_setting() -> stmt::Statement {
+    let settings = Source::Table(SourceTable {
+        tables: vec![TableRef::Table(TableId(1))],
+        from: vec![TableWithJoins {
+            relation: TableFactor::Table(SourceTableId(0)),
+            joins: vec![],
+        }],
+    });
+    let outer_id = Expr::column(ExprColumn {
+        nesting: 1,
+        table: 0,
+        column: 0,
+    });
+    let value = Select {
+        returning: Returning::Project(Expr::record([col(0, 3)])),
+        source: settings,
+        filter: Filter::from(Expr::and(
+            Expr::eq(col(0, 1), outer_id),
+            Expr::eq(col(0, 2), Expr::arg(0)),
+        )),
+        distinct: false,
+    };
+    let mut query = select_id_from_users();
+    query.order_by = Some(OrderBy {
+        exprs: vec![OrderByExpr {
+            expr: Expr::stmt(stmt::Query::builder(value).build()),
+            order: Some(Direction::Asc),
+            nulls: Some(Nulls::Last),
+        }],
+    });
+    query.into()
+}
+
+#[test]
+fn order_by_correlated_scalar_subquery() {
+    let schema = users_settings_schema();
+
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY (SELECT tbl_1_0."value" AS column1 FROM "settings" AS tbl_1_0 WHERE tbl_1_0."user_id" = tbl_0_0."id" AND tbl_1_0."key" = ?1) ASC NULLS LAST;"#]]
+        .assert_eq(&render_sqlite(&schema, users_by_setting()));
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY (SELECT tbl_1_0."value" AS column1 FROM "settings" AS tbl_1_0 WHERE tbl_1_0."user_id" = tbl_0_0."id" AND tbl_1_0."key" = $1) ASC NULLS LAST;"#]]
+        .assert_eq(&render_postgresql(&schema, users_by_setting()));
+    // MySQL repeats the subquery in its `IS NULL` key, and binds the
+    // parameter once per occurrence.
+    let (sql, args) = Serializer::mysql(&schema)
+        .serialize_with_arg_order(&SqlStatement::from(users_by_setting()));
+    expect!["SELECT tbl_0_0.`id` AS column_0 FROM `users` AS tbl_0_0 ORDER BY (SELECT tbl_1_0.`value` AS column_0 FROM `settings` AS tbl_1_0 WHERE tbl_1_0.`user_id` = tbl_0_0.`id` AND tbl_1_0.`key` = ?) IS NULL, (SELECT tbl_1_0.`value` AS column_0 FROM `settings` AS tbl_1_0 WHERE tbl_1_0.`user_id` = tbl_0_0.`id` AND tbl_1_0.`key` = ?) ASC;"]
+        .assert_eq(&sql);
+    assert_eq!(args, [0, 0]);
 }

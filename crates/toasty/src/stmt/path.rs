@@ -339,6 +339,7 @@ impl<T, U> Path<T, U> {
         OrderByExpr {
             expr: self.untyped.into_stmt(),
             order: Some(Direction::Asc),
+            nulls: None,
         }
     }
 
@@ -360,6 +361,7 @@ impl<T, U> Path<T, U> {
         OrderByExpr {
             expr: self.untyped.into_stmt(),
             order: Some(Direction::Desc),
+            nulls: None,
         }
     }
 }

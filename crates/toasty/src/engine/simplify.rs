@@ -187,9 +187,41 @@ impl VisitMut for Simplify<'_> {
     }
 
     fn visit_stmt_query_mut(&mut self, stmt: &mut stmt::Query) {
-        stmt::visit_mut::visit_stmt_query_mut(self, stmt);
+        if let Some(with) = &mut stmt.with {
+            self.visit_with_mut(with);
+        }
+
+        self.visit_expr_set_mut(&mut stmt.body);
+
+        {
+            // `ORDER BY` reads the rows of the body: a subquery in it (a
+            // value of a related record) refers to the enclosing row through
+            // the body's source.
+            let mut s = self.scope(&stmt.body);
+
+            if let Some(order_by) = &mut stmt.order_by {
+                s.visit_order_by_mut(order_by);
+            }
+
+            if let Some(limit) = &mut stmt.limit {
+                s.visit_limit_mut(limit);
+            }
+        }
 
         self.simplify_stmt_query_when_empty(stmt);
+    }
+
+    fn visit_order_by_expr_mut(&mut self, i: &mut stmt::OrderByExpr) {
+        stmt::visit_mut::visit_order_by_expr_mut(self, i);
+
+        // A scalar subquery that selects no row is NULL (a value of a
+        // related record whose filter can never match).
+        if let stmt::Expr::Stmt(expr_stmt) = &i.expr
+            && let stmt::Statement::Query(query) = &*expr_stmt.stmt
+            && matches!(&query.body, stmt::ExprSet::Values(values) if values.is_empty())
+        {
+            i.expr = stmt::Expr::null();
+        }
     }
 
     fn visit_source_mut(&mut self, source: &mut stmt::Source) {

@@ -40,6 +40,7 @@ impl Statement {
                         IndexOp::Eq => None,
                         IndexOp::Sort(direction) => Some(direction),
                     },
+                    nulls: None,
                 })
                 .collect(),
             unique: index.unique,
