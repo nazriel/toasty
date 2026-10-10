@@ -5,6 +5,7 @@ mod drop;
 #[cfg(test)]
 mod fixtures;
 mod generate;
+mod new;
 mod reset;
 mod snapshot;
 
@@ -12,6 +13,7 @@ pub use apply::ApplyCommand;
 pub use config::{MigrationConfig, MigrationPrefixStyle};
 pub use drop::DropCommand;
 pub use generate::GenerateCommand;
+pub use new::NewCommand;
 pub use reset::ResetCommand;
 pub use snapshot::SnapshotCommand;
 
@@ -22,8 +24,8 @@ use toasty::Db;
 
 /// Top-level `migration` subcommand.
 ///
-/// Groups all migration-related subcommands: apply, generate, snapshot, drop,
-/// and reset. This struct is used by clap to parse `toasty migration <sub>`.
+/// Groups all migration-related subcommands: apply, generate, new, snapshot,
+/// drop, and reset. This struct is used by clap to parse `toasty migration <sub>`.
 #[derive(Parser, Debug)]
 pub struct MigrationCommand {
     #[command(subcommand)]
@@ -37,6 +39,9 @@ enum MigrationSubcommand {
 
     /// Generate a new migration based on schema changes
     Generate(GenerateCommand),
+
+    /// Create a migration to write by hand, for SQL the models do not imply
+    New(NewCommand),
 
     /// Print the current schema snapshot file
     Snapshot(SnapshotCommand),
@@ -59,6 +64,7 @@ impl MigrationSubcommand {
         match self {
             Self::Apply(cmd) => cmd.run(db, config).await,
             Self::Generate(cmd) => cmd.run(db, config),
+            Self::New(cmd) => cmd.run(db, config),
             Self::Snapshot(cmd) => cmd.run(db, config),
             Self::Drop(cmd) => cmd.run(db, config),
             Self::Reset(cmd) => cmd.run(db, config).await,

@@ -334,6 +334,70 @@ fn collect_rename_hints(
     Ok(hints)
 }
 
+/// Writes a migration's SQL file and its snapshot, adds the history entry and
+/// saves the history, numbering all three as the config says. Returns the
+/// migration file's name.
+///
+/// This is the one place that lays a migration down on disk, shared by
+/// `generate` and `new`, so a hand-written step is indistinguishable from a
+/// generated one.
+pub(super) fn write_migration(
+    config: &Config,
+    history: &mut History,
+    name: Option<&str>,
+    sql: &str,
+    snapshot: &str,
+) -> Result<String> {
+    let migration_prefix = match config.migration.prefix_style {
+        crate::MigrationPrefixStyle::Sequential => {
+            format!("{:04}", history.next_migration_number())
+        }
+        crate::MigrationPrefixStyle::Timestamp => {
+            jiff::Timestamp::now().strftime("%Y%m%d_%H%M%S").to_string()
+        }
+    };
+    let snapshot_name = format!("{migration_prefix:04}_snapshot.toml");
+    let snapshot_path = config.migration.get_snapshots_dir().join(&snapshot_name);
+
+    let migration_name = format!(
+        "{:04}_{}.sql",
+        migration_prefix,
+        name.unwrap_or("migration")
+    );
+    let migration_path = config.migration.get_migrations_dir().join(&migration_name);
+
+    history.add_entry(HistoryEntry {
+        // Some databases only supported signed 64-bit integers.
+        id: rand::rng().random_range(0..i64::MAX) as u64,
+        name: migration_name.clone(),
+        snapshot_name: snapshot_name.clone(),
+        checksum: None,
+    });
+
+    std::fs::write(&migration_path, sql)?;
+    println!(
+        "  {} {}",
+        style("✓").green().bold(),
+        style(format!("Created migration file: {}", migration_name)).dim()
+    );
+
+    std::fs::write(&snapshot_path, snapshot)?;
+    println!(
+        "  {} {}",
+        style("✓").green().bold(),
+        style(format!("Created snapshot: {}", snapshot_name)).dim()
+    );
+
+    history.save(config.migration.get_history_file_path())?;
+    println!(
+        "  {} {}",
+        style("✓").green().bold(),
+        style("Updated migration history").dim()
+    );
+
+    Ok(migration_name)
+}
+
 impl GenerateCommand {
     pub(crate) fn run(self, db: &Db, config: &Config) -> Result<()> {
         println!();
@@ -389,55 +453,14 @@ impl GenerateCommand {
             return Ok(());
         };
 
-        let migration_prefix = match config.migration.prefix_style {
-            crate::MigrationPrefixStyle::Sequential => {
-                format!("{:04}", history.next_migration_number())
-            }
-            crate::MigrationPrefixStyle::Timestamp => {
-                jiff::Timestamp::now().strftime("%Y%m%d_%H%M%S").to_string()
-            }
-        };
-        let snapshot_name = format!("{migration_prefix:04}_snapshot.toml");
-        let snapshot_path = config.migration.get_snapshots_dir().join(&snapshot_name);
-
-        let migration_name = format!(
-            "{:04}_{}.sql",
-            migration_prefix,
-            self.name.as_deref().unwrap_or("migration")
-        );
-        let migration_path = config.migration.get_migrations_dir().join(&migration_name);
-
-        history.add_entry(HistoryEntry {
-            // Some databases only supported signed 64-bit integers.
-            id: rand::rng().random_range(0..i64::MAX) as u64,
-            name: migration_name.clone(),
-            snapshot_name: snapshot_name.clone(),
-            checksum: None,
-        });
-
-        let snapshot = generated.snapshot.to_toml_string()?;
-        let migration = generated.migration;
-        let Migration::Sql(sql) = migration;
-        std::fs::write(&migration_path, format!("{sql}\n"))?;
-        println!(
-            "  {} {}",
-            style("✓").green().bold(),
-            style(format!("Created migration file: {}", migration_name)).dim()
-        );
-
-        std::fs::write(&snapshot_path, snapshot)?;
-        println!(
-            "  {} {}",
-            style("✓").green().bold(),
-            style(format!("Created snapshot: {}", snapshot_name)).dim()
-        );
-
-        history.save(&history_path)?;
-        println!(
-            "  {} {}",
-            style("✓").green().bold(),
-            style("Updated migration history").dim()
-        );
+        let Migration::Sql(sql) = generated.migration;
+        let migration_name = write_migration(
+            config,
+            &mut history,
+            self.name.as_deref(),
+            &format!("{sql}\n"),
+            &generated.snapshot.to_toml_string()?,
+        )?;
 
         println!();
         println!(

@@ -3,7 +3,7 @@
 //!
 //! `toasty-cli` provides [`ToastyCli`], a ready-made CLI runner that wraps a
 //! [`toasty::Db`] handle and exposes database migration subcommands (generate,
-//! apply, drop, reset, snapshot). It uses [clap] for argument parsing and
+//! new, apply, drop, reset, snapshot). It uses [clap] for argument parsing and
 //! [dialoguer] for interactive prompts.
 //!
 //! The crate also exposes the underlying configuration used by the command
@@ -40,7 +40,7 @@ mod utility;
 pub use config::Config;
 pub use migration::{
     ApplyCommand, DropCommand, GenerateCommand, MigrationCommand, MigrationConfig,
-    MigrationPrefixStyle, ResetCommand, SnapshotCommand,
+    MigrationPrefixStyle, NewCommand, ResetCommand, SnapshotCommand,
 };
 
 use anyhow::Result;

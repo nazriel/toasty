@@ -29,6 +29,8 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+toasty = { workspace = true, features = ["migration", "sqlite"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
