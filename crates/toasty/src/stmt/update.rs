@@ -1,4 +1,4 @@
-use super::Query;
+use super::{List, Query};
 use crate::{
     Executor, Result,
     schema::{Load, Model},
@@ -164,6 +164,83 @@ impl<T: Load> Update<T> {
     /// ```
     pub async fn exec(self, executor: &mut dyn Executor) -> Result<T::Output> {
         executor.exec(self.into()).await
+    }
+}
+
+impl<T> Update<T> {
+    /// Execute this update and return the number of records it changed.
+    ///
+    /// The count is what the update changed, not what matched before it ran:
+    /// inside a transaction it reflects the transaction's view, and a filter
+    /// that matches nothing returns `0`. A record the update matched counts
+    /// even when its assigned values equal the stored ones. Works on every
+    /// driver.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # #[derive(Debug, toasty::Model)]
+    /// # struct User {
+    /// #     #[key]
+    /// #     id: i64,
+    /// #     name: String,
+    /// # }
+    /// # let driver = toasty_driver_sqlite::Sqlite::in_memory();
+    /// # let mut db = toasty::Db::builder().models(toasty::models!(User)).build(driver).await.unwrap();
+    /// # db.push_schema().await.unwrap();
+    /// # User::create().id(1).name("Alice").exec(&mut db).await.unwrap();
+    /// use toasty::stmt::{List, Query, Update};
+    ///
+    /// let mut update = Update::<List<User>>::new(Query::<List<User>>::all());
+    /// update.set(1, toasty_core::stmt::Value::from("Bob"));
+    /// assert_eq!(update.exec_count(&mut db).await.unwrap(), 1);
+    /// # });
+    /// ```
+    pub async fn exec_count(self, executor: &mut dyn Executor) -> Result<u64> {
+        super::exec_count(executor, self.untyped.into()).await
+    }
+}
+
+impl<M: Model> Update<List<M>> {
+    /// Execute this update and return the records it changed, with their
+    /// values after the update.
+    ///
+    /// A filter that matches nothing returns an empty `Vec`, so an update
+    /// filtered on a field's expected value doubles as a compare-and-set: an
+    /// empty result means another writer changed the record first.
+    ///
+    /// SQLite and PostgreSQL return the rows with `UPDATE ... RETURNING`.
+    /// MySQL and MariaDB have no `RETURNING` on `UPDATE`; there the records
+    /// are read back with a `SELECT` over the update's filter after the update
+    /// runs. That read is not atomic with the update, and it misses a record
+    /// the update moved out of its own filter, so a compare-and-set needs
+    /// [`exec_count`](Update::exec_count) on those drivers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # #[derive(Debug, toasty::Model)]
+    /// # struct User {
+    /// #     #[key]
+    /// #     id: i64,
+    /// #     name: String,
+    /// # }
+    /// # let driver = toasty_driver_sqlite::Sqlite::in_memory();
+    /// # let mut db = toasty::Db::builder().models(toasty::models!(User)).build(driver).await.unwrap();
+    /// # db.push_schema().await.unwrap();
+    /// # User::create().id(1).name("Alice").exec(&mut db).await.unwrap();
+    /// use toasty::stmt::{List, Query, Update};
+    ///
+    /// let mut update = Update::<List<User>>::new(Query::<List<User>>::all());
+    /// update.set(1, toasty_core::stmt::Value::from("Bob"));
+    /// let users: Vec<User> = update.exec_returning(&mut db).await.unwrap();
+    /// assert_eq!(users[0].name, "Bob");
+    /// # });
+    /// ```
+    pub async fn exec_returning(self, executor: &mut dyn Executor) -> Result<Vec<M>> {
+        super::exec_returning(executor, self.untyped.into()).await
     }
 }
 

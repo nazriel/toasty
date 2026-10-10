@@ -319,6 +319,60 @@ records are loaded first.
 > **Runnable example:** [`store-operations`] runs transactions, savepoints, batches, query-based updates and deletes, and raw SQL.
 
 
+## What a query update changed
+
+A query update's `.exec()` returns `()`. To learn what the update
+changed, call one of these instead:
+
+- `.exec_count(&mut db)` returns the number of records the update
+  changed.
+- `.exec_returning(&mut db)` returns the changed records, with their
+  values after the update.
+
+Both report what the update itself wrote, not what matched before it
+ran. A filter that matches nothing returns `0` or an empty `Vec`, not
+an error. Inside a transaction they see the transaction's own writes.
+
+Filtering on a field's expected value turns a query update into a
+compare-and-set: only one of two writers racing on the same record
+changes it, and the other sees `0`:
+
+```rust
+# use toasty::Model;
+# #[derive(Debug, toasty::Model)]
+# struct Job {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     status: String,
+# }
+# async fn __example(mut db: toasty::Db, job_id: u64) -> toasty::Result<()> {
+let claimed = Job::filter(
+    Job::fields()
+        .id()
+        .eq(job_id)
+        .and(Job::fields().status().eq("queued")),
+)
+.update()
+.status("running")
+.exec_count(&mut db)
+.await?;
+
+if claimed == 0 {
+    // Another worker claimed the job first.
+}
+# Ok(())
+# }
+```
+
+`.exec_count()` works on every database. `.exec_returning()` uses
+`UPDATE ... RETURNING` on SQLite and PostgreSQL. MySQL and MariaDB
+have no `RETURNING` on `UPDATE`, so Toasty reads the records back with
+a `SELECT` over the same filter after the update. That read is not
+atomic with the update, and it cannot find a record the update moved
+out of its own filter (as the compare-and-set above does), so use
+`.exec_count()` there.
+
 ## Update by indexed field
 
 Toasty generates `update_by_*` convenience methods for key and
@@ -432,7 +486,9 @@ the derive generates:
   update builder.
 
 The update builder has a setter for each field. The `UPDATE`
-statement includes only the fields you set.
+statement includes only the fields you set. A query's update builder
+also has `.exec_count()` and `.exec_returning()` (see
+[What a query update changed](#what-a-query-update-changed)).
 
 > **Runnable example:** [`cms-article-fields`] covers field options — defaults, auto timestamps, `Json<T>`, a queryable `Vec<scalar>`, and deferred columns.
 

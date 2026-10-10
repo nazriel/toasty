@@ -182,14 +182,18 @@ impl Expand<'_> {
 
                 #builder_methods
 
-                fn build_stmt(&mut self) -> #toasty::core::stmt::Statement {
+                fn build_update(&mut self) -> #toasty::stmt::Update<<#target_ty as #toasty::UpdateTarget>::Returning> {
                     use #toasty::UpdateTarget as _;
                     let assignments = ::std::mem::take(&mut self.assignments);
                     let mut stmt = self.target.to_update_stmt(assignments);
                     if let Some(cond) = self.condition.take() {
                         stmt.as_untyped_mut().condition = #toasty::core::stmt::Condition::new(cond);
                     }
-                    stmt.into_untyped()
+                    stmt
+                }
+
+                fn build_stmt(&mut self) -> #toasty::core::stmt::Statement {
+                    self.build_update().into_untyped()
                 }
 
                 #vis async fn exec(mut self, executor: &mut dyn #toasty::Executor) -> #toasty::Result<()> {
@@ -197,6 +201,25 @@ impl Expand<'_> {
                     let value = response.values.collect_as_value().await?;
                     self.target.apply_result(value)?;
                     Ok(())
+                }
+            }
+
+            // ----- Query-based updates: what the update changed -----
+            impl #update_struct_ident<#query_struct_ident> {
+                /// Execute the update and return the number of records it
+                /// changed. A filter that matches nothing returns `0`.
+                #vis async fn exec_count(mut self, executor: &mut dyn #toasty::Executor) -> #toasty::Result<u64> {
+                    self.build_update().exec_count(executor).await
+                }
+
+                /// Execute the update and return the records it changed, with
+                /// their values after the update. A filter that matches
+                /// nothing returns an empty `Vec`.
+                #vis async fn exec_returning(
+                    mut self,
+                    executor: &mut dyn #toasty::Executor,
+                ) -> #toasty::Result<::std::vec::Vec<#model_ident>> {
+                    self.build_update().exec_returning(executor).await
                 }
             }
 

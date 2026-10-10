@@ -70,6 +70,7 @@ impl toasty_driver_integration_suite::Setup for DynamoDbSetup {
 toasty_driver_integration_suite::generate_driver_tests!(DynamoDbSetup::new(),
     sql: false,
     returning_from_insert: false,
+    returning_from_update: false,
     returning_from_delete: false,
     auto_increment: false,
     bigdecimal_implemented: false,

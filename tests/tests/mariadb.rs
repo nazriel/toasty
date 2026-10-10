@@ -62,5 +62,6 @@ toasty_driver_integration_suite::generate_driver_tests!(MariaDbSetup::default(),
     vec_pop: false,
     vec_remove_at: false,
     transaction_lock_mode: false,
+    returning_from_update: false,
     returning_from_delete: false,
 );
