@@ -157,6 +157,8 @@ pub mod sql;
 pub use toasty_macros::embed_migrations;
 pub use toasty_macros::{Embed, Model, create, query, update};
 
-pub use toasty_core::{Error, Result, schema::app::ModelSet};
+pub use toasty_core::{
+    ConstraintViolation, ConstraintViolationKind, Error, Result, schema::app::ModelSet,
+};
 
 pub mod codegen_support;

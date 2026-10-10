@@ -10,6 +10,7 @@ mod adhoc;
 mod condition_failed;
 mod connection_lost;
 mod connection_pool;
+mod constraint_violation;
 mod driver_operation_failed;
 mod expression_evaluation_failed;
 mod invalid_connection_url;
@@ -30,6 +31,7 @@ use adhoc::Adhoc;
 use condition_failed::ConditionFailed;
 use connection_lost::ConnectionLost;
 use connection_pool::ConnectionPool;
+pub use constraint_violation::{ConstraintViolation, ConstraintViolationKind};
 use driver_operation_failed::DriverOperationFailed;
 use expression_evaluation_failed::ExpressionEvaluationFailed;
 use invalid_connection_url::InvalidConnectionUrl;
@@ -124,6 +126,7 @@ enum ErrorKind {
     UnsupportedFeature(UnsupportedFeature),
     ValidationFailed(ValidationFailed),
     ConditionFailed(ConditionFailed),
+    ConstraintViolation(ConstraintViolation),
 }
 
 impl Error {
@@ -238,6 +241,7 @@ impl core::fmt::Display for ErrorKind {
             UnsupportedFeature(err) => core::fmt::Display::fmt(err, f),
             ValidationFailed(err) => core::fmt::Display::fmt(err, f),
             ConditionFailed(err) => core::fmt::Display::fmt(err, f),
+            ConstraintViolation(err) => core::fmt::Display::fmt(err, f),
         }
     }
 }
@@ -534,5 +538,48 @@ mod tests {
             err.to_string(),
             "create user failed: read-only transaction: INSERT not allowed"
         );
+    }
+
+    #[test]
+    fn constraint_violation_display_keeps_the_database_message() {
+        let err = Error::constraint_violation(ConstraintViolation::new(
+            ConstraintViolationKind::Unique,
+            "UNIQUE constraint failed: users.email",
+        ));
+        assert_eq!(
+            err.to_string(),
+            "unique constraint violation: UNIQUE constraint failed: users.email"
+        );
+    }
+
+    #[test]
+    fn constraint_violation_predicates_and_detail() {
+        let err = Error::constraint_violation(
+            ConstraintViolation::new(ConstraintViolationKind::Unique, "duplicate")
+                .with_table("users")
+                .with_columns(["tenant", "email"])
+                .with_constraint("index_users_by_tenant_and_email"),
+        );
+        assert!(err.is_constraint_violation());
+        assert!(err.is_unique_violation());
+        assert!(!err.is_driver_operation_failed());
+
+        let violation = err.as_constraint_violation().unwrap();
+        assert_eq!(violation.kind(), ConstraintViolationKind::Unique);
+        assert_eq!(violation.message(), "duplicate");
+        assert_eq!(violation.table(), Some("users"));
+        assert_eq!(violation.columns(), ["tenant", "email"]);
+        assert_eq!(
+            violation.constraint(),
+            Some("index_users_by_tenant_and_email")
+        );
+    }
+
+    #[test]
+    fn constraint_violation_predicates_false_for_other_errors() {
+        let err = Error::serialization_failure("concurrent update conflict");
+        assert!(!err.is_constraint_violation());
+        assert!(!err.is_unique_violation());
+        assert!(err.as_constraint_violation().is_none());
     }
 }

@@ -225,6 +225,7 @@ error variants so the pool and caller can react sensibly.
 |---|---|
 | `40001` *(serialization_failure)* | `Error::SerializationFailure` — retryable. The transaction lost an optimistic conflict and should be retried by the caller. |
 | `25006` *(read_only_sql_transaction)* | `Error::ReadOnlyTransaction` — the connection is read-only. |
+| `23505` *(unique_violation)* | `Error::ConstraintViolation` of kind `Unique`, with the table and constraint name the server reports. |
 | Other server errors with a SQLSTATE | `Error::DriverOperationFailed` |
 | Socket / protocol errors (closed connection, broken pipe, end-of-stream during handshake) | `Error::ConnectionLost` |
 

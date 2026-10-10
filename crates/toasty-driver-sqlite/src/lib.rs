@@ -23,6 +23,9 @@ pub(crate) use value::Value;
 mod blocking;
 use blocking::BlockingConnection;
 
+mod error;
+use error::classify_sqlite_error;
+
 use async_trait::async_trait;
 use rusqlite::Connection as RusqliteConnection;
 use std::{
@@ -182,8 +185,7 @@ impl Connection {
 
     /// Open a SQLite connection to a file at `path`.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let connection =
-            RusqliteConnection::open(path).map_err(toasty_core::Error::driver_operation_failed)?;
+        let connection = RusqliteConnection::open(path).map_err(classify_sqlite_error)?;
         let sqlite = Self {
             connection: BlockingConnection::new(connection),
             query_log: QueryLogConfig::default(),
@@ -210,7 +212,7 @@ impl Connection {
                 for statement in &statements {
                     connection
                         .execute(statement, [])
-                        .map_err(toasty_core::Error::driver_operation_failed)?;
+                        .map_err(classify_sqlite_error)?;
                 }
                 Ok(())
             })
@@ -245,7 +247,7 @@ fn exec_sql_inner(
 ) -> Result<ExecResponse> {
     let mut stmt = connection
         .prepare_cached(sql_str)
-        .map_err(toasty_core::Error::driver_operation_failed)?;
+        .map_err(classify_sqlite_error)?;
 
     let params = typed_params
         .into_iter()
@@ -255,14 +257,14 @@ fn exec_sql_inner(
     if matches!(ret, SqlReturn::Count) {
         let count = stmt
             .execute(rusqlite::params_from_iter(params.iter()))
-            .map_err(toasty_core::Error::driver_operation_failed)?;
+            .map_err(classify_sqlite_error)?;
 
         return Ok(ExecResponse::count(count as _));
     }
 
     let mut rows = stmt
         .query(rusqlite::params_from_iter(params.iter()))
-        .map_err(toasty_core::Error::driver_operation_failed)?;
+        .map_err(classify_sqlite_error)?;
 
     let mut values = vec![];
     let column_count = rows.as_ref().map(|stmt| stmt.column_count()).unwrap_or(0);
@@ -286,7 +288,7 @@ fn exec_sql_inner(
             }
             Ok(None) => break,
             Err(err) => {
-                return Err(toasty_core::Error::driver_operation_failed(err));
+                return Err(classify_sqlite_error(err));
             }
         }
     }
@@ -405,22 +407,22 @@ fn applied_migrations(
         )",
             [],
         )
-        .map_err(toasty_core::Error::driver_operation_failed)?;
+        .map_err(classify_sqlite_error)?;
 
     // Query all applied migrations
     let mut stmt = connection
         .prepare("SELECT id FROM __toasty_migrations ORDER BY applied_at")
-        .map_err(toasty_core::Error::driver_operation_failed)?;
+        .map_err(classify_sqlite_error)?;
 
     let rows = stmt
         .query_map([], |row| {
             let id: i64 = row.get(0)?;
             Ok(toasty_core::schema::db::AppliedMigration::new(id as u64))
         })
-        .map_err(toasty_core::Error::driver_operation_failed)?;
+        .map_err(classify_sqlite_error)?;
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(toasty_core::Error::driver_operation_failed)
+        .map_err(classify_sqlite_error)
 }
 
 fn apply_migration(
@@ -439,22 +441,22 @@ fn apply_migration(
         )",
             [],
         )
-        .map_err(toasty_core::Error::driver_operation_failed)?;
+        .map_err(classify_sqlite_error)?;
 
     // Start transaction
     connection
         .execute("BEGIN", [])
-        .map_err(toasty_core::Error::driver_operation_failed)?;
+        .map_err(classify_sqlite_error)?;
 
     // Execute each migration statement
     for statement in statements {
         if let Err(e) = connection
             .execute(statement, [])
-            .map_err(toasty_core::Error::driver_operation_failed)
+            .map_err(classify_sqlite_error)
         {
             connection
                 .execute("ROLLBACK", [])
-                .map_err(toasty_core::Error::driver_operation_failed)?;
+                .map_err(classify_sqlite_error)?;
             return Err(e);
         }
     }
@@ -465,18 +467,18 @@ fn apply_migration(
             "INSERT INTO __toasty_migrations (id, name, applied_at) VALUES (?1, ?2, datetime('now'))",
             rusqlite::params![id as i64, name],
         )
-        .map_err(toasty_core::Error::driver_operation_failed)
+        .map_err(classify_sqlite_error)
     {
         connection
             .execute("ROLLBACK", [])
-            .map_err(toasty_core::Error::driver_operation_failed)?;
+            .map_err(classify_sqlite_error)?;
         return Err(e);
     }
 
     // Commit transaction
     connection
         .execute("COMMIT", [])
-        .map_err(toasty_core::Error::driver_operation_failed)?;
+        .map_err(classify_sqlite_error)?;
     Ok(())
 }
 

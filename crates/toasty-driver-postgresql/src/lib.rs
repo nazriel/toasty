@@ -62,6 +62,19 @@ fn classify_pg_error(e: tokio_postgres::Error) -> toasty_core::Error {
         match db_err.code().code() {
             "40001" => toasty_core::Error::serialization_failure(db_err.message()),
             "25006" => toasty_core::Error::read_only_transaction(db_err.message()),
+            "23505" => {
+                let mut violation = toasty_core::ConstraintViolation::new(
+                    toasty_core::ConstraintViolationKind::Unique,
+                    db_err.message(),
+                );
+                if let Some(table) = db_err.table() {
+                    violation = violation.with_table(table);
+                }
+                if let Some(constraint) = db_err.constraint() {
+                    violation = violation.with_constraint(constraint);
+                }
+                toasty_core::Error::constraint_violation(violation)
+            }
             _ => toasty_core::Error::driver_operation_failed(e),
         }
     } else {

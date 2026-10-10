@@ -73,6 +73,22 @@ assert!(result.is_err());
 # }
 ```
 
+Drivers that classify constraint errors (currently SQLite and PostgreSQL)
+report a duplicate as a unique violation, so it can be told apart from
+other failures without matching the database's message. The violation
+carries the detail the database reports, such as the table, the columns,
+or the constraint name:
+
+```rust
+# fn __example(err: toasty::Error) {
+if let Some(violation) = err.as_constraint_violation() {
+    if violation.is_unique() && violation.columns() == ["email"] {
+        // The email address is already taken.
+    }
+}
+# }
+```
+
 ### Generated methods for unique fields
 
 Because a unique field identifies at most one record, Toasty generates a

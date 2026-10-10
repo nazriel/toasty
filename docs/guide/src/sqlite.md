@@ -259,12 +259,19 @@ migrations.
 
 The driver does not classify errors into Toasty's typed retry
 variants. Every `rusqlite` failure surfaces as
-`Error::DriverOperationFailed`, with two specific exceptions:
+`Error::DriverOperationFailed`, with these exceptions:
 
 | Condition | Toasty error |
 |---|---|
 | URL with a non-`sqlite` scheme | `Error::InvalidConnectionUrl` |
 | Transaction started with an isolation level other than `Serializable` | `Error::UnsupportedFeature` |
+| `SQLITE_CONSTRAINT_UNIQUE` or `SQLITE_CONSTRAINT_PRIMARYKEY` | `Error::ConstraintViolation` of kind `Unique`, with the table and columns from SQLite's message |
+
+The violation is recognised by SQLite's extended result code, not by
+the message. SQLite reports the table and columns only in the message
+(`UNIQUE constraint failed: users.email`), so the driver takes them
+from there; for a unique index on an expression, SQLite names the
+index instead, and the driver reports it as the constraint name.
 
 SQLite has no out-of-process backend to lose, so there are no
 `ConnectionLost` errors and no health-check pings to perform. The

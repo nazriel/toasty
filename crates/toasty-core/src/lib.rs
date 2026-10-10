@@ -33,6 +33,7 @@ pub use driver::Connection;
 mod error;
 /// The error type returned by Toasty operations.
 pub use error::Error;
+pub use error::{ConstraintViolation, ConstraintViolationKind};
 
 /// Schema migration metadata shared by Toasty runtime and macros.
 #[cfg(feature = "migration")]

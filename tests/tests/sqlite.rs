@@ -250,3 +250,142 @@ mod contention {
         assert_eq!(count_entries(&mut db).await, 2);
     }
 }
+
+// The driver reports unique and primary key violations as typed constraint
+// violations, recognised by SQLite's extended result code, with the table and
+// columns SQLite names in its message.
+
+mod constraint_violation {
+    use toasty::ConstraintViolationKind;
+
+    #[derive(Debug, toasty::Model)]
+    struct User {
+        #[key]
+        #[auto]
+        id: i64,
+
+        #[unique]
+        email: String,
+    }
+
+    #[derive(Debug, toasty::Model)]
+    #[unique(tenant, slug)]
+    struct Page {
+        #[key]
+        #[auto]
+        id: i64,
+
+        tenant: String,
+        slug: String,
+    }
+
+    #[derive(Debug, toasty::Model)]
+    struct Code {
+        #[key]
+        code: String,
+    }
+
+    async fn db(models: toasty::ModelSet) -> toasty::Db {
+        let db = toasty::Db::builder()
+            .models(models)
+            .build(toasty_driver_sqlite::Sqlite::in_memory())
+            .await
+            .unwrap();
+        db.push_schema().await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn duplicate_value_in_a_unique_column_is_a_unique_violation() {
+        let mut db = db(toasty::models!(User)).await;
+        let users = db.schema().db.tables[0].name.clone();
+
+        User::create()
+            .email("alice@example.com")
+            .exec(&mut db)
+            .await
+            .unwrap();
+        let err = User::create()
+            .email("alice@example.com")
+            .exec(&mut db)
+            .await
+            .unwrap_err();
+
+        assert!(err.is_constraint_violation(), "{err}");
+        assert!(err.is_unique_violation(), "{err}");
+        let violation = err.as_constraint_violation().unwrap();
+        assert_eq!(violation.kind(), ConstraintViolationKind::Unique);
+        assert_eq!(violation.table(), Some(users.as_str()));
+        assert_eq!(violation.columns(), ["email"]);
+        assert!(
+            err.to_string().contains("UNIQUE constraint failed"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_unique_violation_reports_every_column() {
+        let mut db = db(toasty::models!(Page)).await;
+        let pages = db.schema().db.tables[0].name.clone();
+
+        Page::create()
+            .tenant("acme")
+            .slug("home")
+            .exec(&mut db)
+            .await
+            .unwrap();
+        // The same slug for another tenant is not a duplicate.
+        Page::create()
+            .tenant("globex")
+            .slug("home")
+            .exec(&mut db)
+            .await
+            .unwrap();
+        let err = Page::create()
+            .tenant("acme")
+            .slug("home")
+            .exec(&mut db)
+            .await
+            .unwrap_err();
+
+        let violation = err.as_constraint_violation().unwrap();
+        assert!(violation.is_unique());
+        assert_eq!(violation.table(), Some(pages.as_str()));
+        assert_eq!(violation.columns(), ["tenant", "slug"]);
+    }
+
+    #[tokio::test]
+    async fn primary_key_collision_is_a_unique_violation() {
+        let mut db = db(toasty::models!(Code)).await;
+        let codes = db.schema().db.tables[0].name.clone();
+
+        Code::create().code("A1").exec(&mut db).await.unwrap();
+        let err = Code::create().code("A1").exec(&mut db).await.unwrap_err();
+
+        assert!(err.is_unique_violation(), "{err}");
+        let violation = err.as_constraint_violation().unwrap();
+        assert_eq!(violation.table(), Some(codes.as_str()));
+        assert_eq!(violation.columns(), ["code"]);
+    }
+
+    #[tokio::test]
+    async fn statement_on_a_missing_table_is_not_a_constraint_violation() {
+        // The schema is never pushed, so the table does not exist.
+        let mut db = toasty::Db::builder()
+            .models(toasty::models!(User))
+            .build(toasty_driver_sqlite::Sqlite::in_memory())
+            .await
+            .unwrap();
+
+        let err = User::create()
+            .email("alice@example.com")
+            .exec(&mut db)
+            .await
+            .unwrap_err();
+
+        assert!(err.is_driver_operation_failed(), "{err}");
+        assert!(!err.is_constraint_violation(), "{err}");
+        assert!(!err.is_unique_violation(), "{err}");
+        assert!(err.as_constraint_violation().is_none());
+    }
+}
