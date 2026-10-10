@@ -234,16 +234,18 @@ emits SQLite-compatible DDL, with one important caveat:
 **SQLite cannot `ALTER COLUMN` a type.** Changing a column's type,
 nullability, or auto-increment status requires rebuilding the table.
 The migration generator handles this automatically with the standard
-six-step rebuild:
+rebuild:
 
 1. `PRAGMA foreign_keys = OFF`
 2. `CREATE TABLE _toasty_new_<name>` with the target schema
 3. `INSERT INTO _toasty_new_<name> SELECT ... FROM <name>` (renames
    are tracked, so the column mapping uses the old names on the
    source side)
-4. `DROP TABLE <name>`
+4. `DROP TABLE <name>`, which also drops every index on it
 5. `ALTER TABLE _toasty_new_<name> RENAME TO <name>`
-6. `PRAGMA foreign_keys = ON`
+6. `CREATE INDEX` for each of the target table's indices, unchanged
+   ones included; the primary key is part of `CREATE TABLE`
+7. `PRAGMA foreign_keys = ON`
 
 The rebuild copies every row, so a column type change on a large
 table is proportional to the table size. Renaming a column on its

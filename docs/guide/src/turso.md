@@ -343,5 +343,5 @@ variant.
 `apply_migration` wraps each migration in `BEGIN` / `COMMIT`; a
 statement failure rolls the migration back. The migration generator
 emits the same SQLite-compatible DDL as the SQLite driver, including
-the same six-step rebuild for unsupported `ALTER COLUMN`s. See
+the same table rebuild for unsupported `ALTER COLUMN`s. See
 [SQLite migrations](./sqlite.md#migrations) for the mechanics.

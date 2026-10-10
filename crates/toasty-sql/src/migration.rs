@@ -197,21 +197,25 @@ impl<'a> MigrationStatement<'a> {
                         Self::emit_table_recreation(
                             &mut result,
                             schema,
+                            schema_diff.next(),
                             previous,
                             next,
                             columns,
                             capability,
                         );
-                    } else {
-                        Self::emit_column_changes(
-                            &mut result,
-                            schema,
-                            previous.id,
-                            columns,
-                            capability,
-                            &renamed_types,
-                        );
+                        // The recreation creates every index of the next table,
+                        // including the ones this diff creates or alters.
+                        continue;
                     }
+
+                    Self::emit_column_changes(
+                        &mut result,
+                        schema,
+                        previous.id,
+                        columns,
+                        capability,
+                        &renamed_types,
+                    );
 
                     // Create new indices after the column changes so they reference
                     // the next schema's column definitions.
@@ -241,6 +245,7 @@ impl<'a> MigrationStatement<'a> {
     fn emit_table_recreation(
         result: &mut Vec<Self>,
         schema: Cow<'a, Schema>,
+        next_schema: &'a Schema,
         previous: &Table,
         next: &Table,
         columns: &[diff::Column<'_>],
@@ -327,7 +332,20 @@ impl<'a> MigrationStatement<'a> {
             schema.clone(),
         ));
 
-        // 6. PRAGMA foreign_keys = ON
+        // 6. CREATE INDEX for every index of the next table. Dropping the
+        // current table dropped all of its indices, not only the ones the diff
+        // changes.
+        for index in &next.indices {
+            if index.primary_key {
+                continue; // PK indices are created as part of CREATE TABLE
+            }
+            result.push(Self::new(
+                Statement::create_index(index),
+                Cow::Borrowed(next_schema),
+            ));
+        }
+
+        // 7. PRAGMA foreign_keys = ON
         result.push(Self::new(
             Statement::pragma_enable_foreign_keys(),
             schema.clone(),
