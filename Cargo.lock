@@ -5102,6 +5102,7 @@ dependencies = [
  "serde",
  "toasty-core",
  "toasty-sql",
+ "tokio",
  "tracing",
  "uuid",
 ]

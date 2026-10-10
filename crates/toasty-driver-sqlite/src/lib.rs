@@ -20,6 +20,9 @@
 mod value;
 pub(crate) use value::Value;
 
+mod blocking;
+use blocking::BlockingConnection;
+
 use async_trait::async_trait;
 use rusqlite::Connection as RusqliteConnection;
 use std::{
@@ -155,9 +158,14 @@ impl Driver for Sqlite {
 }
 
 /// An open connection to a SQLite database.
+///
+/// Every call to the underlying rusqlite connection runs on tokio's blocking
+/// thread pool. A statement waiting for a lock held by another connection (up
+/// to SQLite's busy timeout) therefore never blocks the async runtime that
+/// awaits it.
 #[derive(Debug)]
 pub struct Connection {
-    connection: RusqliteConnection,
+    connection: BlockingConnection,
     query_log: QueryLogConfig,
 }
 
@@ -167,7 +175,7 @@ impl Connection {
         let connection = RusqliteConnection::open_in_memory().unwrap();
 
         Self {
-            connection,
+            connection: BlockingConnection::new(connection),
             query_log: QueryLogConfig::default(),
         }
     }
@@ -177,90 +185,116 @@ impl Connection {
         let connection =
             RusqliteConnection::open(path).map_err(toasty_core::Error::driver_operation_failed)?;
         let sqlite = Self {
-            connection,
+            connection: BlockingConnection::new(connection),
             query_log: QueryLogConfig::default(),
         };
         Ok(sqlite)
     }
 
-    fn exec_sql(
-        &mut self,
-        sql_str: &str,
+    async fn exec_sql(
+        &self,
+        sql_str: String,
         typed_params: Vec<TypedValue>,
         ret: SqlReturn,
     ) -> Result<ExecResponse> {
-        let mut log = QueryLog::sql(
-            &self.query_log,
-            "sqlite",
-            sql_str,
-            typed_params.iter().map(|tv| &tv.value),
-        );
-        let result = self.exec_sql_inner(sql_str, typed_params, ret, &mut log);
-        log.finish(&result);
-        result
+        let query_log = self.query_log;
+        self.connection
+            .call(move |connection| exec_sql(connection, &query_log, &sql_str, typed_params, ret))
+            .await
     }
 
-    fn exec_sql_inner(
-        &mut self,
-        sql_str: &str,
-        typed_params: Vec<TypedValue>,
-        ret: SqlReturn,
-        log: &mut QueryLog<'_>,
-    ) -> Result<ExecResponse> {
-        let mut stmt = self
-            .connection
-            .prepare_cached(sql_str)
+    /// Execute each statement in turn, stopping at the first error.
+    async fn execute_batch(&self, statements: Vec<String>) -> Result<()> {
+        self.connection
+            .call(move |connection| {
+                for statement in &statements {
+                    connection
+                        .execute(statement, [])
+                        .map_err(toasty_core::Error::driver_operation_failed)?;
+                }
+                Ok(())
+            })
+            .await
+    }
+}
+
+fn exec_sql(
+    connection: &mut RusqliteConnection,
+    query_log: &QueryLogConfig,
+    sql_str: &str,
+    typed_params: Vec<TypedValue>,
+    ret: SqlReturn,
+) -> Result<ExecResponse> {
+    let mut log = QueryLog::sql(
+        query_log,
+        "sqlite",
+        sql_str,
+        typed_params.iter().map(|tv| &tv.value),
+    );
+    let result = exec_sql_inner(connection, sql_str, typed_params, ret, &mut log);
+    log.finish(&result);
+    result
+}
+
+fn exec_sql_inner(
+    connection: &mut RusqliteConnection,
+    sql_str: &str,
+    typed_params: Vec<TypedValue>,
+    ret: SqlReturn,
+    log: &mut QueryLog<'_>,
+) -> Result<ExecResponse> {
+    let mut stmt = connection
+        .prepare_cached(sql_str)
+        .map_err(toasty_core::Error::driver_operation_failed)?;
+
+    let params = typed_params
+        .into_iter()
+        .map(|tv| Value::from(tv.value))
+        .collect::<Vec<_>>();
+
+    if matches!(ret, SqlReturn::Count) {
+        let count = stmt
+            .execute(rusqlite::params_from_iter(params.iter()))
             .map_err(toasty_core::Error::driver_operation_failed)?;
 
-        let params = typed_params
-            .into_iter()
-            .map(|tv| Value::from(tv.value))
-            .collect::<Vec<_>>();
+        return Ok(ExecResponse::count(count as _));
+    }
 
-        if matches!(ret, SqlReturn::Count) {
-            let count = stmt
-                .execute(rusqlite::params_from_iter(params.iter()))
-                .map_err(toasty_core::Error::driver_operation_failed)?;
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(params.iter()))
+        .map_err(toasty_core::Error::driver_operation_failed)?;
 
-            return Ok(ExecResponse::count(count as _));
-        }
+    let mut values = vec![];
+    let column_count = rows.as_ref().map(|stmt| stmt.column_count()).unwrap_or(0);
 
-        let mut rows = stmt
-            .query(rusqlite::params_from_iter(params.iter()))
-            .map_err(toasty_core::Error::driver_operation_failed)?;
+    loop {
+        match rows.next() {
+            Ok(Some(row)) => {
+                let items = match &ret {
+                    SqlReturn::Count => unreachable!(),
+                    SqlReturn::Infer => (0..column_count)
+                        .map(|index| Value::from_sql_infer(row, index).into_inner())
+                        .collect(),
+                    SqlReturn::Types(ret_tys) => ret_tys
+                        .iter()
+                        .enumerate()
+                        .map(|(index, ret_ty)| Value::from_sql(row, index, ret_ty).into_inner())
+                        .collect(),
+                };
 
-        let mut values = vec![];
-        let column_count = rows.as_ref().map(|stmt| stmt.column_count()).unwrap_or(0);
-
-        loop {
-            match rows.next() {
-                Ok(Some(row)) => {
-                    let items = match &ret {
-                        SqlReturn::Count => unreachable!(),
-                        SqlReturn::Infer => (0..column_count)
-                            .map(|index| Value::from_sql_infer(row, index).into_inner())
-                            .collect(),
-                        SqlReturn::Types(ret_tys) => ret_tys
-                            .iter()
-                            .enumerate()
-                            .map(|(index, ret_ty)| Value::from_sql(row, index, ret_ty).into_inner())
-                            .collect(),
-                    };
-
-                    values.push(stmt::ValueRecord::from_vec(items).into());
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    return Err(toasty_core::Error::driver_operation_failed(err));
-                }
+                values.push(stmt::ValueRecord::from_vec(items).into());
+            }
+            Ok(None) => break,
+            Err(err) => {
+                return Err(toasty_core::Error::driver_operation_failed(err));
             }
         }
-
-        log.rows(values.len() as u64);
-        Ok(ExecResponse::value_stream(stmt::ValueStream::from_vec(
-            values,
-        )))
     }
+
+    log.rows(values.len() as u64);
+    Ok(ExecResponse::value_stream(stmt::ValueStream::from_vec(
+        values,
+    )))
 }
 
 #[async_trait]
@@ -277,7 +311,7 @@ impl toasty_core::driver::Connection for Connection {
                     RawSqlRet::Infer => SqlReturn::Infer,
                     RawSqlRet::Types(types) => SqlReturn::Types(types),
                 };
-                return self.exec_sql(&op.sql, op.params, ret);
+                return self.exec_sql(op.sql, op.params, ret).await;
             }
             Operation::Transaction(mut op) => {
                 if let Transaction::Start { isolation, .. } = &mut op {
@@ -289,9 +323,7 @@ impl toasty_core::driver::Connection for Connection {
                     *isolation = None;
                 }
                 let sql = sql::Serializer::sqlite(&schema.db).serialize_transaction(&op);
-                self.connection
-                    .execute(&sql, [])
-                    .map_err(toasty_core::Error::driver_operation_failed)?;
+                self.execute_batch(vec![sql]).await?;
                 return Ok(ExecResponse::count(0));
             }
             _ => todo!("op={:#?}", op),
@@ -323,13 +355,13 @@ impl toasty_core::driver::Connection for Connection {
         };
 
         let sql_str = sql::Serializer::sqlite(&schema.db).serialize(&sql);
-        self.exec_sql(&sql_str, typed_params, ret)
+        self.exec_sql(sql_str, typed_params, ret).await
     }
 
     async fn push_schema(&mut self, schema: &Schema) -> Result<()> {
         for table in &schema.db.tables {
             tracing::debug!(table = %table.name, "creating table");
-            self.create_table(&schema.db, table)?;
+            self.execute_batch(create_table(&schema.db, table)).await?;
         }
 
         Ok(())
@@ -338,33 +370,7 @@ impl toasty_core::driver::Connection for Connection {
     async fn applied_migrations(
         &mut self,
     ) -> Result<Vec<toasty_core::schema::db::AppliedMigration>> {
-        // Ensure the migrations table exists
-        self.connection
-            .execute(
-                "CREATE TABLE IF NOT EXISTS __toasty_migrations (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .map_err(toasty_core::Error::driver_operation_failed)?;
-
-        // Query all applied migrations
-        let mut stmt = self
-            .connection
-            .prepare("SELECT id FROM __toasty_migrations ORDER BY applied_at")
-            .map_err(toasty_core::Error::driver_operation_failed)?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                Ok(toasty_core::schema::db::AppliedMigration::new(id as u64))
-            })
-            .map_err(toasty_core::Error::driver_operation_failed)?;
-
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(toasty_core::Error::driver_operation_failed)
+        self.connection.call(applied_migrations).await
     }
 
     async fn apply_migration(
@@ -374,77 +380,121 @@ impl toasty_core::driver::Connection for Connection {
         migration: &toasty_core::schema::db::Migration,
     ) -> Result<()> {
         tracing::info!(id = id, name = %name, "applying migration");
-        // Ensure the migrations table exists
+        let name = name.to_string();
+        let statements: Vec<String> = migration
+            .statements()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         self.connection
-            .execute(
-                "CREATE TABLE IF NOT EXISTS __toasty_migrations (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .map_err(toasty_core::Error::driver_operation_failed)?;
-
-        // Start transaction
-        self.connection
-            .execute("BEGIN", [])
-            .map_err(toasty_core::Error::driver_operation_failed)?;
-
-        // Execute each migration statement
-        for statement in migration.statements() {
-            if let Err(e) = self
-                .connection
-                .execute(statement, [])
-                .map_err(toasty_core::Error::driver_operation_failed)
-            {
-                self.connection
-                    .execute("ROLLBACK", [])
-                    .map_err(toasty_core::Error::driver_operation_failed)?;
-                return Err(e);
-            }
-        }
-
-        // Record the migration
-        if let Err(e) = self.connection.execute(
-            "INSERT INTO __toasty_migrations (id, name, applied_at) VALUES (?1, ?2, datetime('now'))",
-            rusqlite::params![id as i64, name],
-        ).map_err(toasty_core::Error::driver_operation_failed) {
-            self.connection.execute("ROLLBACK", []).map_err(toasty_core::Error::driver_operation_failed)?;
-            return Err(e);
-        }
-
-        // Commit transaction
-        self.connection
-            .execute("COMMIT", [])
-            .map_err(toasty_core::Error::driver_operation_failed)?;
-        Ok(())
+            .call(move |connection| apply_migration(connection, id, &name, &statements))
+            .await
     }
 }
 
-impl Connection {
-    fn create_table(&mut self, schema: &db::Schema, table: &Table) -> Result<()> {
-        let serializer = sql::Serializer::sqlite(schema);
+fn applied_migrations(
+    connection: &mut RusqliteConnection,
+) -> Result<Vec<toasty_core::schema::db::AppliedMigration>> {
+    // Ensure the migrations table exists
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS __toasty_migrations (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )",
+            [],
+        )
+        .map_err(toasty_core::Error::driver_operation_failed)?;
 
-        let stmt = serializer.serialize(&sql::Statement::create_table(table, &Capability::SQLITE));
+    // Query all applied migrations
+    let mut stmt = connection
+        .prepare("SELECT id FROM __toasty_migrations ORDER BY applied_at")
+        .map_err(toasty_core::Error::driver_operation_failed)?;
 
-        self.connection
-            .execute(&stmt, [])
-            .map_err(toasty_core::Error::driver_operation_failed)?;
+    let rows = stmt
+        .query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            Ok(toasty_core::schema::db::AppliedMigration::new(id as u64))
+        })
+        .map_err(toasty_core::Error::driver_operation_failed)?;
 
-        // Create any indices
-        for index in &table.indices {
-            // The PK has already been created by the table statement
-            if index.primary_key {
-                continue;
-            }
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(toasty_core::Error::driver_operation_failed)
+}
 
-            let stmt = serializer.serialize(&sql::Statement::create_index(index));
+fn apply_migration(
+    connection: &mut RusqliteConnection,
+    id: u64,
+    name: &str,
+    statements: &[String],
+) -> Result<()> {
+    // Ensure the migrations table exists
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS __toasty_migrations (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )",
+            [],
+        )
+        .map_err(toasty_core::Error::driver_operation_failed)?;
 
-            self.connection
-                .execute(&stmt, [])
+    // Start transaction
+    connection
+        .execute("BEGIN", [])
+        .map_err(toasty_core::Error::driver_operation_failed)?;
+
+    // Execute each migration statement
+    for statement in statements {
+        if let Err(e) = connection
+            .execute(statement, [])
+            .map_err(toasty_core::Error::driver_operation_failed)
+        {
+            connection
+                .execute("ROLLBACK", [])
                 .map_err(toasty_core::Error::driver_operation_failed)?;
+            return Err(e);
         }
-        Ok(())
     }
+
+    // Record the migration
+    if let Err(e) = connection
+        .execute(
+            "INSERT INTO __toasty_migrations (id, name, applied_at) VALUES (?1, ?2, datetime('now'))",
+            rusqlite::params![id as i64, name],
+        )
+        .map_err(toasty_core::Error::driver_operation_failed)
+    {
+        connection
+            .execute("ROLLBACK", [])
+            .map_err(toasty_core::Error::driver_operation_failed)?;
+        return Err(e);
+    }
+
+    // Commit transaction
+    connection
+        .execute("COMMIT", [])
+        .map_err(toasty_core::Error::driver_operation_failed)?;
+    Ok(())
+}
+
+/// The statements that create `table` and its indices.
+fn create_table(schema: &db::Schema, table: &Table) -> Vec<String> {
+    let serializer = sql::Serializer::sqlite(schema);
+
+    let mut statements =
+        vec![serializer.serialize(&sql::Statement::create_table(table, &Capability::SQLITE))];
+
+    // Create any indices
+    for index in &table.indices {
+        // The PK has already been created by the table statement
+        if index.primary_key {
+            continue;
+        }
+
+        statements.push(serializer.serialize(&sql::Statement::create_index(index)));
+    }
+    statements
 }
