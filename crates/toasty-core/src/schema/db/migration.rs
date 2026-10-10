@@ -36,11 +36,32 @@ impl Migration {
     }
 
     /// Returns individual SQL statements by splitting on breakpoint markers.
+    ///
+    /// A chunk that holds no SQL, only whitespace and `--` comment lines, is
+    /// not a statement and is left out: a driver would send it to the
+    /// database as an empty query, which some databases reject. A chunk that
+    /// holds SQL together with comments is returned as it is.
+    ///
+    /// Only whole lines starting with `--` count as comments. A `/* */` block
+    /// comment, or a `--` that continues a multi-line string literal, makes
+    /// the chunk count as SQL.
     pub fn statements(&self) -> Vec<&str> {
         match self {
-            Migration::Sql(sql) => sql.split("\n-- #[toasty::breakpoint]\n").collect(),
+            Migration::Sql(sql) => sql
+                .split("\n-- #[toasty::breakpoint]\n")
+                .filter(|chunk| has_sql(chunk))
+                .collect(),
         }
     }
+}
+
+/// Returns `true` if `chunk` has a line that is neither blank nor a `--`
+/// comment.
+fn has_sql(chunk: &str) -> bool {
+    chunk.lines().any(|line| {
+        let line = line.trim_start();
+        !line.is_empty() && !line.starts_with("--")
+    })
 }
 
 /// Metadata about a migration that has already been applied to a database.

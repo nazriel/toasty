@@ -389,3 +389,37 @@ fn add_column_nullable_applies_to_a_filled_table() {
         .unwrap();
     assert_eq!(nulls, 2);
 }
+
+#[test]
+fn applies_a_migration_with_a_comment_only_chunk() {
+    use toasty_core::driver::{ConnectContext, Driver};
+    use toasty_core::schema::db::Migration;
+
+    let migration = Migration::new_sql(
+        "CREATE TABLE notes (id INTEGER PRIMARY KEY)\n\
+         -- #[toasty::breakpoint]\n\
+         -- a note written by hand\n\
+         \n\
+         -- #[toasty::breakpoint]\n\
+         CREATE INDEX notes_by_id ON notes (id)\n"
+            .to_string(),
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut connection = Sqlite::in_memory()
+            .connect(&ConnectContext::default())
+            .await
+            .unwrap();
+        connection
+            .apply_migration(1, "0001_notes.sql", &migration)
+            .await
+            .unwrap();
+
+        let applied = connection.applied_migrations().await.unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].id(), 1);
+    });
+}
