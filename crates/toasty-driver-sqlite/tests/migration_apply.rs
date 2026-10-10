@@ -245,3 +245,58 @@ fn recreate_table_creates_new_and_altered_indices_once_on_a_filled_table() {
         )
         .unwrap();
 }
+
+#[test]
+fn rename_table_applies_to_a_filled_table() {
+    let table = |name: &str| Schema {
+        tables: vec![make_table(
+            0,
+            name,
+            vec![
+                make_column(0, 0, "id", Type::Integer(8)),
+                make_column(0, 1, "email", Type::Text),
+            ],
+            vec![make_index(
+                0,
+                1,
+                &format!("index_{name}_by_email"),
+                &[1],
+                true,
+            )],
+        )],
+    };
+    let from = table("users");
+    let to = table("accounts");
+    let mut hints = diff::RenameHints::new();
+    hints.add_table_hint(TableId(0), TableId(0));
+
+    let migration = Sqlite::in_memory().generate_migration(&diff::Schema::from(&from, &to, &hints));
+    assert!(
+        !migration.statements().iter().any(|s| s.contains("_by_id")),
+        "got: {migration:#?}"
+    );
+
+    let connection = create_schema(&from);
+    connection
+        .execute(
+            "INSERT INTO users (id, email) VALUES (1, 'a@example.com'), (2, 'b@example.com')",
+            [],
+        )
+        .unwrap();
+
+    migrate(&connection, &from, &to, &hints).unwrap();
+
+    assert_eq!(count_rows(&connection, "accounts"), 2);
+    assert_eq!(
+        index_names(&connection, "accounts"),
+        ["index_accounts_by_email"]
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO accounts (id, email) VALUES (3, 'a@example.com')",
+                [],
+            )
+            .is_err()
+    );
+}

@@ -145,7 +145,9 @@ Table "users" is missing
 ```
 
 Choosing the rename option generates an `ALTER TABLE ... RENAME` statement
-instead of a `DROP TABLE` followed by a `CREATE TABLE`.
+instead of a `DROP TABLE` followed by a `CREATE TABLE`. Index names include the
+table's name, so each of the table's other indices is dropped and created again
+under its new name. The primary key is part of the table and needs no statement.
 
 ## Applying migrations
 
