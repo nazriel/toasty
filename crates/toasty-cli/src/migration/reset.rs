@@ -1,6 +1,7 @@
 use super::apply::apply_migrations;
 use crate::Config;
 use crate::theme::dialoguer_theme;
+use crate::utility::is_interactive;
 use anyhow::Result;
 use clap::Parser;
 use console::style;
@@ -21,6 +22,12 @@ pub struct ResetCommand {
 
 impl ResetCommand {
     pub(crate) async fn run(self, db: &Db, config: &Config) -> Result<()> {
+        // The confirmation cannot be answered without a terminal, and the
+        // reset must not go ahead without it.
+        if !is_interactive() {
+            anyhow::bail!("cannot ask for confirmation to reset the database without a terminal");
+        }
+
         println!();
         println!("  {}", style("Reset Database").cyan().bold().underlined());
         println!();

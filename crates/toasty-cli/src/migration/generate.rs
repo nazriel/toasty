@@ -1,8 +1,9 @@
-use crate::{Config, theme::dialoguer_theme};
-use anyhow::Result;
+use super::answers::{self, Answer, Answers, Kind, Question};
+use crate::{Config, theme::dialoguer_theme, utility::is_interactive};
+use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use dialoguer::Select;
+use dialoguer::{Confirm, Select};
 use hashbrown::{HashMap, HashSet};
 use rand::RngExt;
 use std::fs;
@@ -22,8 +23,13 @@ use toasty::{
 /// migration file, writes a new snapshot, and updates the history file.
 ///
 /// When the diff contains dropped-and-added tables, columns, or indices, the
-/// command interactively asks whether these are renames rather than
-/// drop-then-create pairs.
+/// command asks whether these are renames rather than drop-then-create pairs.
+/// Choosing to drop must be confirmed, and the confirmation defaults to no.
+///
+/// The questions can be answered with the `--rename-*` and `--drop-*` flags
+/// instead, which lets the command run without a terminal. Without a terminal,
+/// a question that no flag answers is an error: the command never assumes
+/// that something was dropped.
 ///
 /// If no schema changes are detected, the command exits without creating any
 /// files.
@@ -32,10 +38,105 @@ pub struct GenerateCommand {
     /// Name for the migration
     #[arg(short, long)]
     name: Option<String>,
+
+    /// Answer that a table was renamed: `old=new`. Can be repeated.
+    #[arg(long, value_name = "OLD=NEW")]
+    rename_table: Vec<String>,
+
+    /// Answer that a column was renamed: `table.old=new`, with the table's
+    /// name in the previous snapshot. Can be repeated.
+    #[arg(long, value_name = "TABLE.OLD=NEW")]
+    rename_column: Vec<String>,
+
+    /// Answer that an index was renamed: `table.old=new`, with the table's
+    /// name in the previous snapshot. Can be repeated.
+    #[arg(long, value_name = "TABLE.OLD=NEW")]
+    rename_index: Vec<String>,
+
+    /// Answer that a table was dropped: `name`. Can be repeated.
+    #[arg(long, value_name = "NAME")]
+    drop_table: Vec<String>,
+
+    /// Answer that a column was dropped: `table.name`. Can be repeated.
+    #[arg(long, value_name = "TABLE.NAME")]
+    drop_column: Vec<String>,
+
+    /// Answer that an index was dropped: `table.name`. Can be repeated.
+    #[arg(long, value_name = "TABLE.NAME")]
+    drop_index: Vec<String>,
 }
 
-/// Collects rename hints by interactively asking the user about potential renames
-fn collect_rename_hints(previous_schema: &Schema, schema: &Schema) -> Result<diff::RenameHints> {
+/// Asks one question at the terminal.
+type Ask<'a> = &'a mut dyn FnMut(&Question) -> Result<Answer>;
+
+/// Asks the question on the terminal. The prompt opens on the first rename, not
+/// on dropping, and dropping needs a confirmation that defaults to no.
+fn ask_on_terminal(question: &Question) -> Result<Answer> {
+    let noun = question.kind.noun();
+    let mut options = vec![format!("  Drop \"{}\" ✖", question.missing)];
+    for candidate in &question.candidates {
+        options.push(format!(
+            "  Rename \"{}\" → \"{}\"",
+            question.missing, candidate
+        ));
+    }
+
+    loop {
+        let selection = Select::with_theme(&dialoguer_theme())
+            .with_prompt(question.prompt())
+            .items(&options)
+            .default(1)
+            .interact()?;
+
+        if selection > 0 {
+            return Ok(Answer::Rename(selection - 1));
+        }
+
+        let confirmed = Confirm::with_theme(&dialoguer_theme())
+            .with_prompt(format!(
+                "  Drop {noun} \"{}\"? Its data is lost",
+                question.missing
+            ))
+            .default(false)
+            .interact()?;
+        if confirmed {
+            return Ok(Answer::Drop);
+        }
+    }
+}
+
+/// Answers a question from the flags, or else at the terminal. Without a
+/// terminal, the question is recorded in `unanswered` and answered with a
+/// placeholder; the caller must fail before it generates anything.
+fn resolve(
+    question: Question,
+    answers: &mut Answers,
+    ask: &mut Option<Ask<'_>>,
+    unanswered: &mut Vec<Question>,
+) -> Result<Answer> {
+    if let Some(answer) = answers.answer(&question)? {
+        return Ok(answer);
+    }
+
+    match ask {
+        Some(ask) => ask(&question).with_context(|| format!("no answer was read for: {question}")),
+        None => {
+            unanswered.push(question);
+            Ok(Answer::Drop)
+        }
+    }
+}
+
+/// Collects rename hints by asking about potential renames: from the flags in
+/// `answers`, then at the terminal through `ask`. With no `ask`, a question the
+/// flags do not answer is an error.
+fn collect_rename_hints(
+    previous_schema: &Schema,
+    schema: &Schema,
+    answers: &mut Answers,
+    mut ask: Option<Ask<'_>>,
+) -> Result<diff::RenameHints> {
+    let mut unanswered = Vec::new();
     let mut hints = diff::RenameHints::default();
     let mut ignored_tables = HashSet::<TableId>::new();
     let mut ignored_columns = HashMap::<TableId, HashSet<ColumnId>>::new();
@@ -63,32 +164,31 @@ fn collect_rename_hints(previous_schema: &Schema, schema: &Schema) -> Result<dif
             })
             .collect();
 
+        for dropped_table in &dropped_tables {
+            answers.note_dropped(Kind::Table, None, &dropped_table.name);
+        }
+
         // If there are both dropped and added tables, ask about potential renames
         if !dropped_tables.is_empty() && !added_tables.is_empty() {
             for dropped_table in &dropped_tables {
-                let mut options = vec![format!("  Drop \"{}\" ✖", dropped_table.name)];
-                for added_table in &added_tables {
-                    options.push(format!(
-                        "  Rename \"{}\" → \"{}\"",
-                        dropped_table.name, added_table.name
-                    ));
-                }
+                let question = Question {
+                    kind: Kind::Table,
+                    scope: None,
+                    missing: dropped_table.name.clone(),
+                    candidates: added_tables.iter().map(|t| t.name.clone()).collect(),
+                };
 
-                let selection = Select::with_theme(&dialoguer_theme())
-                    .with_prompt(format!("  Table \"{}\" is missing", dropped_table.name))
-                    .items(&options)
-                    .default(0)
-                    .interact()?;
-
-                if selection == 0 {
-                    // User confirmed it was dropped
-                    ignored_tables.insert(dropped_table.id);
-                } else {
-                    // User indicated a rename (selection - 1 maps to added_tables index)
-                    let to_table = added_tables[selection - 1];
-                    drop(diff);
-                    hints.add_table_hint(dropped_table.id, to_table.id);
-                    continue 'main; // Regenerate diff with new hint
+                match resolve(question, answers, &mut ask, &mut unanswered)? {
+                    Answer::Drop => {
+                        // It was dropped
+                        ignored_tables.insert(dropped_table.id);
+                    }
+                    Answer::Rename(position) => {
+                        let to_table = added_tables[position];
+                        drop(diff);
+                        hints.add_table_hint(dropped_table.id, to_table.id);
+                        continue 'main; // Regenerate diff with new hint
+                    }
                 }
             }
         }
@@ -125,37 +225,33 @@ fn collect_rename_hints(previous_schema: &Schema, schema: &Schema) -> Result<dif
                     })
                     .collect();
 
+                for dropped_column in &dropped_columns {
+                    answers.note_dropped(Kind::Column, Some(&previous.name), &dropped_column.name);
+                }
+
                 if !dropped_columns.is_empty() && !added_columns.is_empty() {
                     for dropped_column in &dropped_columns {
-                        let mut options = vec![format!("  Drop \"{}\" ✖", dropped_column.name)];
-                        for added_column in &added_columns {
-                            options.push(format!(
-                                "  Rename \"{}\" → \"{}\"",
-                                dropped_column.name, added_column.name
-                            ));
-                        }
+                        let question = Question {
+                            kind: Kind::Column,
+                            scope: Some(previous.name.clone()),
+                            missing: dropped_column.name.clone(),
+                            candidates: added_columns.iter().map(|c| c.name.clone()).collect(),
+                        };
 
-                        let selection = Select::with_theme(&dialoguer_theme())
-                            .with_prompt(format!(
-                                "  Column \"{}\".\"{}\" is missing",
-                                previous.name, dropped_column.name
-                            ))
-                            .items(&options)
-                            .default(0)
-                            .interact()?;
-
-                        if selection == 0 {
-                            // User confirmed it was dropped
-                            ignored_columns
-                                .entry(previous.id)
-                                .or_default()
-                                .insert(dropped_column.id);
-                        } else {
-                            // User indicated a rename
-                            let next_column = added_columns[selection - 1];
-                            drop(diff);
-                            hints.add_column_hint(dropped_column.id, next_column.id);
-                            continue 'main; // Regenerate diff with new hint
+                        match resolve(question, answers, &mut ask, &mut unanswered)? {
+                            Answer::Drop => {
+                                // It was dropped
+                                ignored_columns
+                                    .entry(previous.id)
+                                    .or_default()
+                                    .insert(dropped_column.id);
+                            }
+                            Answer::Rename(position) => {
+                                let next_column = added_columns[position];
+                                drop(diff);
+                                hints.add_column_hint(dropped_column.id, next_column.id);
+                                continue 'main; // Regenerate diff with new hint
+                            }
                         }
                     }
                 }
@@ -183,37 +279,33 @@ fn collect_rename_hints(previous_schema: &Schema, schema: &Schema) -> Result<dif
                     })
                     .collect();
 
+                for dropped_index in &dropped_indices {
+                    answers.note_dropped(Kind::Index, Some(&previous.name), &dropped_index.name);
+                }
+
                 if !dropped_indices.is_empty() && !added_indices.is_empty() {
                     for dropped_index in &dropped_indices {
-                        let mut options = vec![format!("  Drop \"{}\" ✖", dropped_index.name)];
-                        for added_index in &added_indices {
-                            options.push(format!(
-                                "  Rename \"{}\" → \"{}\"",
-                                dropped_index.name, added_index.name
-                            ));
-                        }
+                        let question = Question {
+                            kind: Kind::Index,
+                            scope: Some(previous.name.clone()),
+                            missing: dropped_index.name.clone(),
+                            candidates: added_indices.iter().map(|i| i.name.clone()).collect(),
+                        };
 
-                        let selection = Select::with_theme(&dialoguer_theme())
-                            .with_prompt(format!(
-                                "  Index \"{}\".\"{}\" is missing",
-                                previous.name, dropped_index.name
-                            ))
-                            .items(&options)
-                            .default(0)
-                            .interact()?;
-
-                        if selection == 0 {
-                            // User confirmed it was dropped
-                            ignored_indices
-                                .entry(previous.id)
-                                .or_default()
-                                .insert(dropped_index.id);
-                        } else {
-                            // User indicated a rename
-                            let to_index = added_indices[selection - 1];
-                            drop(diff);
-                            hints.add_index_hint(dropped_index.id, to_index.id);
-                            continue 'main; // Regenerate diff with new hint
+                        match resolve(question, answers, &mut ask, &mut unanswered)? {
+                            Answer::Drop => {
+                                // It was dropped
+                                ignored_indices
+                                    .entry(previous.id)
+                                    .or_default()
+                                    .insert(dropped_index.id);
+                            }
+                            Answer::Rename(position) => {
+                                let to_index = added_indices[position];
+                                drop(diff);
+                                hints.add_index_hint(dropped_index.id, to_index.id);
+                                continue 'main; // Regenerate diff with new hint
+                            }
                         }
                     }
                 }
@@ -222,6 +314,21 @@ fn collect_rename_hints(previous_schema: &Schema, schema: &Schema) -> Result<dif
 
         // No more potential renames to ask about
         break;
+    }
+
+    // A flag that matched nothing is reported with the questions it was meant
+    // for: a misspelled name leaves both behind.
+    let leftover = answers.finish().err();
+    if !unanswered.is_empty() {
+        let mut message = answers::unanswered(&unanswered).to_string();
+        if let Some(leftover) = leftover {
+            message.push('\n');
+            message.push_str(&leftover.to_string());
+        }
+        anyhow::bail!(message);
+    }
+    if let Some(leftover) = leftover {
+        return Err(leftover);
     }
 
     Ok(hints)
@@ -255,7 +362,20 @@ impl GenerateCommand {
 
         let schema = toasty::schema::db::Schema::clone(&db.schema().db);
 
-        let rename_hints = collect_rename_hints(&previous_schema, &schema)?;
+        let mut answers = Answers::parse(
+            &self.rename_table,
+            &self.rename_column,
+            &self.rename_index,
+            &self.drop_table,
+            &self.drop_column,
+            &self.drop_index,
+        )?;
+        let ask: Option<Ask<'_>> = if is_interactive() {
+            Some(&mut ask_on_terminal)
+        } else {
+            None
+        };
+        let rename_hints = collect_rename_hints(&previous_schema, &schema, &mut answers, ask)?;
         let Some(generated) =
             migration::generate(db.driver(), &previous_schema, &schema, &rename_hints)
         else {
@@ -332,5 +452,226 @@ impl GenerateCommand {
         println!();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migration::fixtures::{describe, schema, table};
+
+    fn flags(
+        rename_tables: &[&str],
+        rename_columns: &[&str],
+        rename_indices: &[&str],
+        drop_tables: &[&str],
+        drop_columns: &[&str],
+        drop_indices: &[&str],
+    ) -> Answers {
+        let owned = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        Answers::parse(
+            &owned(rename_tables),
+            &owned(rename_columns),
+            &owned(rename_indices),
+            &owned(drop_tables),
+            &owned(drop_columns),
+            &owned(drop_indices),
+        )
+        .unwrap()
+    }
+
+    fn column_rename() -> (Schema, Schema) {
+        (
+            schema(vec![table(0, "users", &["email", "name"], &[])]),
+            schema(vec![table(0, "users", &["mail", "name"], &[])]),
+        )
+    }
+
+    #[test]
+    fn a_rename_flag_renames_a_column_without_a_terminal() {
+        let (previous, next) = column_rename();
+        let mut answers = flags(&[], &["users.email=mail"], &[], &[], &[], &[]);
+
+        let hints = collect_rename_hints(&previous, &next, &mut answers, None).unwrap();
+
+        assert_eq!(
+            describe(&previous, &next, &hints),
+            ["rename column users.email to mail"]
+        );
+    }
+
+    #[test]
+    fn a_drop_flag_drops_a_column_without_a_terminal() {
+        let (previous, next) = column_rename();
+        let mut answers = flags(&[], &[], &[], &[], &["users.email"], &[]);
+
+        let hints = collect_rename_hints(&previous, &next, &mut answers, None).unwrap();
+
+        assert_eq!(
+            describe(&previous, &next, &hints),
+            ["drop column users.email", "add column users.mail"]
+        );
+    }
+
+    #[test]
+    fn a_rename_flag_renames_a_table_without_a_terminal() {
+        let previous = schema(vec![table(0, "users", &["email"], &[])]);
+        let next = schema(vec![table(0, "accounts", &["email"], &[])]);
+        // The primary key's index is named after the table, so it is a question too.
+        let mut answers = flags(
+            &["users=accounts"],
+            &[],
+            &["users.index_users_by_id=index_accounts_by_id"],
+            &[],
+            &[],
+            &[],
+        );
+
+        let hints = collect_rename_hints(&previous, &next, &mut answers, None).unwrap();
+
+        assert_eq!(
+            describe(&previous, &next, &hints),
+            [
+                "rename table users to accounts",
+                "rename index users.index_users_by_id to index_accounts_by_id"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rename_flag_renames_an_index_without_a_terminal() {
+        let previous = schema(vec![table(0, "users", &["email"], &["by_email"])]);
+        let next = schema(vec![table(0, "users", &["email"], &["by_mail"])]);
+        let mut answers = flags(&[], &[], &["users.by_email=by_mail"], &[], &[], &[]);
+
+        let hints = collect_rename_hints(&previous, &next, &mut answers, None).unwrap();
+
+        assert_eq!(
+            describe(&previous, &next, &hints),
+            ["rename index users.by_email to by_mail"]
+        );
+    }
+
+    #[test]
+    fn a_missing_answer_without_a_terminal_is_an_error_that_names_the_flags() {
+        let previous = schema(vec![
+            table(0, "users", &["email", "name"], &[]),
+            table(1, "orders", &["total"], &[]),
+        ]);
+        let next = schema(vec![
+            table(0, "users", &["mail", "name"], &[]),
+            table(1, "orders", &["sum"], &[]),
+        ]);
+        let mut answers = flags(&[], &["users.email=mail"], &[], &[], &[], &[]);
+
+        let err = collect_rename_hints(&previous, &next, &mut answers, None)
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert!(err.contains("without a terminal"), "{err}");
+        assert!(!err.contains("users.email"), "{err}");
+        assert!(
+            err.contains("--rename-column orders.total=sum, or --drop-column orders.total"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_flag_that_names_nothing_without_a_terminal_is_an_error() {
+        let (previous, next) = column_rename();
+        let mut answers = flags(
+            &[],
+            &["users.email=mail", "users.ghost=mail"],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+
+        let err = collect_rename_hints(&previous, &next, &mut answers, None)
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert!(err.contains("--rename-column users.ghost=mail"), "{err}");
+        assert!(!err.contains("--rename-column users.email=mail"), "{err}");
+    }
+
+    #[test]
+    fn a_misspelled_flag_is_reported_with_the_question_it_was_meant_for() {
+        let (previous, next) = column_rename();
+        let mut answers = flags(&[], &["users.emial=mail"], &[], &[], &[], &[]);
+
+        let err = collect_rename_hints(&previous, &next, &mut answers, None)
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert!(err.contains("--rename-column users.email=mail"), "{err}");
+        assert!(err.contains("--rename-column users.emial=mail"), "{err}");
+    }
+
+    #[test]
+    fn a_rename_flag_for_a_name_that_is_not_new_is_an_error() {
+        let (previous, next) = column_rename();
+        let mut answers = flags(&[], &["users.email=nope"], &[], &[], &[], &[]);
+
+        let err = collect_rename_hints(&previous, &next, &mut answers, None)
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert!(err.contains("--rename-column users.email=nope"), "{err}");
+    }
+
+    #[test]
+    fn the_terminal_is_asked_only_what_the_flags_leave_open() {
+        let previous = schema(vec![table(0, "users", &["email", "name"], &[])]);
+        let next = schema(vec![table(0, "users", &["mail", "label"], &[])]);
+        let mut answers = flags(&[], &["users.email=mail"], &[], &[], &[], &[]);
+        let mut asked = Vec::new();
+        let mut ask = |question: &Question| {
+            asked.push(question.missing.clone());
+            Ok(Answer::Rename(0))
+        };
+
+        let hints = collect_rename_hints(&previous, &next, &mut answers, Some(&mut ask)).unwrap();
+
+        assert_eq!(asked, ["name"]);
+        assert_eq!(
+            describe(&previous, &next, &hints),
+            [
+                "rename column users.email to mail",
+                "rename column users.name to label"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_prompt_is_an_error_that_names_the_flags() {
+        let (previous, next) = column_rename();
+        let mut answers = Answers::default();
+        let mut ask = |_: &Question| Err(anyhow::anyhow!("unexpected end of input"));
+
+        let err = format!(
+            "{:#}",
+            collect_rename_hints(&previous, &next, &mut answers, Some(&mut ask))
+                .err()
+                .unwrap()
+        );
+
+        assert!(err.contains("--drop-column users.email"), "{err}");
+        assert!(err.contains("unexpected end of input"), "{err}");
+    }
+
+    #[test]
+    fn no_questions_need_no_answers_and_no_terminal() {
+        let both = schema(vec![table(0, "users", &["email"], &["by_email"])]);
+        let mut answers = Answers::default();
+
+        let hints = collect_rename_hints(&both, &both, &mut answers, None).unwrap();
+
+        assert!(describe(&both, &both, &hints).is_empty());
     }
 }

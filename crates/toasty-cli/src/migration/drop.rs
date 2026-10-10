@@ -1,4 +1,4 @@
-use crate::{Config, theme::dialoguer_theme};
+use crate::{Config, theme::dialoguer_theme, utility::is_interactive};
 use anyhow::Result;
 use clap::Parser;
 use console::style;
@@ -46,7 +46,14 @@ impl DropCommand {
                 .position(|m| m.name == *name)
                 .ok_or_else(|| anyhow::anyhow!("Migration '{}' not found", name))?
         } else {
-            // Interactive picker with fancy theme
+            // Interactive picker with fancy theme. Without a terminal there is
+            // nobody to pick, and no migration is dropped by default.
+            if !is_interactive() {
+                anyhow::bail!(
+                    "cannot pick a migration to drop without a terminal; pass --name <migration> or --latest"
+                );
+            }
+
             println!();
             println!("  {}", style("Drop Migration").cyan().bold().underlined());
             println!();

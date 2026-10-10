@@ -1,6 +1,9 @@
+mod answers;
 mod apply;
 mod config;
 mod drop;
+#[cfg(test)]
+mod fixtures;
 mod generate;
 mod reset;
 mod snapshot;
