@@ -208,6 +208,88 @@ async fn migrate_all(primary_db: &toasty::Db, audit_db: &toasty::Db) -> toasty::
 Toasty does not associate migration sets with data source names. The
 application decides which set applies to each `Db` and when to run it.
 
+## Testing migrations
+
+A migration can apply cleanly and still leave a schema that differs from the
+snapshot generated with it: a hand-edited migration that forgets an index, or
+a table rebuild that drops one. `MigrationLadder` (with the `migration`
+feature) checks every migration of a project from a test. For each migration
+it opens a new database, applies the migrations before it, applies the
+migration, reads the schema back from the database and compares it with the
+migration's snapshot:
+
+```rust,ignore
+use toasty::migration::{MigrationLadder, MigrationSet};
+
+static MIGRATIONS: MigrationSet = toasty::embed_migrations!();
+
+async fn connect() -> toasty::Result<toasty::Db> {
+    toasty::Db::builder()
+        .models(toasty::models!(User, Post))
+        .connect("sqlite::memory:")
+        .await
+}
+
+#[tokio::test]
+async fn every_migration_leaves_the_schema_its_snapshot_records() {
+    MigrationLadder::load(MIGRATIONS, "toasty")
+        .unwrap()
+        .run(connect)
+        .await
+        .unwrap();
+}
+```
+
+`MigrationLadder::load` reads `history.toml` and each migration's snapshot
+from the migration directory. A failing step reports the migration and every
+difference:
+
+```text
+migration 0003_nullable_name.sql (step 3): the database differs from its snapshot:
+  - index "users"."index_users_by_email" is missing (unique on "email")
+```
+
+Tables, columns and indexes are matched by name; a column is compared by its
+nullability, an index by its uniqueness and its columns.
+
+A migration that works on an empty database can still fail on one with rows,
+for example a `NOT NULL` column added without a default. The `fill` hook runs
+before each step's migration and inserts the rows a database at that point
+would have; the `check` hook runs after it, for assertions about those rows.
+`steps` limits the run to a range of migrations, so a project can fill only
+the recent ones:
+
+```rust,ignore
+let count = MIGRATIONS.migrations().len();
+
+MigrationLadder::load(MIGRATIONS, "toasty")?
+    .steps(count - 3..)
+    .fill(async |db, step| {
+        // `step.previous()` is the newest migration the database has.
+        toasty::sql::statement("INSERT INTO users (id, email) VALUES (1, 'a@example.com')")
+            .exec(db)
+            .await?;
+        Ok(())
+    })
+    .check(async |db, step| {
+        let rows = toasty::sql::query("SELECT id FROM users").exec(db).await?;
+        assert_eq!(rows.len(), 1, "{} lost a row", step.migration().name());
+        Ok(())
+    })
+    .run(connect)
+    .await?;
+```
+
+A difference a hand-written migration makes on purpose, such as an index the
+models cannot declare, is accepted with `allow`, which takes a predicate over
+`SchemaDifference`.
+
+The same comparison is available on its own: `DatabaseSchema::read(&db)`
+reads a database's schema, and `SchemaDrift::between(&expected, &actual)`
+lists the differences from a `db::Schema`, such as `snapshot.schema` or
+`db.schema().db`. Reading the schema back is supported on SQLite; other
+drivers return an `unsupported_feature` error.
+
 ## Inspecting the current schema
 
 Print the schema snapshot derived from your current model definitions:

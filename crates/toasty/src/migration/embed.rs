@@ -49,6 +49,12 @@ impl MigrationSet {
         self.migrations
     }
 
+    /// The migrations, borrowed for as long as the set's own slice lives, so a
+    /// prefix of them is a set too.
+    pub(super) fn files(&self) -> &'static [MigrationFile] {
+        self.migrations
+    }
+
     /// Applies pending migrations to `db` in order.
     ///
     /// Migration IDs already recorded by the driver are skipped. If a
