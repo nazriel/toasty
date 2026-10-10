@@ -79,6 +79,7 @@ fn root(id: ModelId, name: &str) -> Model {
             }],
             unique: true,
             primary_key: true,
+            filter: None,
         }],
         version_field: None,
     })

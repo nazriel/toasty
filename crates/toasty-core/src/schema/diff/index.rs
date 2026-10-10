@@ -11,7 +11,8 @@ pub enum Index<'a> {
     Create(&'a db::Index),
     /// An existing index was dropped.
     Drop(&'a db::Index),
-    /// An index was modified (name, columns, uniqueness, or other property changed).
+    /// An index was modified (name, columns, uniqueness, partial-index filter,
+    /// or other property changed).
     Alter {
         /// The index definition before the change.
         previous: &'a db::Index,
@@ -45,6 +46,7 @@ impl<'a> Index<'a> {
                 || previous.columns.len() != next.columns.len()
                 || previous.unique != next.unique
                 || previous.primary_key != next.primary_key
+                || previous.filter != next.filter
             {
                 return true;
             }

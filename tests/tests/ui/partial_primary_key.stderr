@@ -1,0 +1,5 @@
+error: a primary key cannot be partial; `filter` is only accepted by `#[index(...)]` and `#[unique(...)]`
+ --> tests/ui/partial_primary_key.rs:4:29
+  |
+4 | #[key(owner, name, filter = "deleted_at IS NULL")]
+  |                             ^^^^^^^^^^^^^^^^^^^^

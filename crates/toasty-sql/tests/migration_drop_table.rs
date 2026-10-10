@@ -204,6 +204,7 @@ fn drop_table_with_index() {
         }],
         unique: false,
         primary_key: false,
+        filter: None,
     };
 
     let from = Schema {

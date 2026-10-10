@@ -120,6 +120,7 @@ fn drop_index_before_indexed_column() {
         }],
         unique: false,
         primary_key: false,
+        filter: None,
     });
 
     let from = Schema {

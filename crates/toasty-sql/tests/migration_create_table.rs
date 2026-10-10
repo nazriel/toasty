@@ -202,6 +202,7 @@ fn create_table_with_index() {
         }],
         unique: false,
         primary_key: false,
+        filter: None,
     };
 
     let to = Schema {
@@ -247,6 +248,7 @@ fn create_table_with_unique_index() {
         }],
         unique: true,
         primary_key: false,
+        filter: None,
     };
 
     let to = Schema {
@@ -350,6 +352,7 @@ fn create_table_no_redundant_pk_index() {
         }],
         unique: true,
         primary_key: true,
+        filter: None,
     };
 
     let to = Schema {

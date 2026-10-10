@@ -283,6 +283,14 @@ impl<'a> BuildModelFilters<'a> {
 
     fn find_index(&self, fields: &[usize]) -> Option<&'a Index> {
         for index in &self.model.indices {
+            // A lookup by these fields alone does not imply a partial index's
+            // predicate, so the database cannot serve it from that index,
+            // and a `get_by_*` over a partial unique index could match
+            // several rows. Partial indexes generate no by-field methods.
+            if index.is_partial() {
+                continue;
+            }
+
             if index.fields.len() < fields.len() {
                 continue;
             }

@@ -73,6 +73,17 @@ impl ToSql for &stmt::CreateIndex {
         fmt!(
             &mut f, "CREATE " unique "INDEX " index_name " ON " table_name " (" columns ")"
         );
+
+        // The predicate is raw SQL over the table's columns, passed through
+        // as written. The schema builder rejects a partial index on a database
+        // without them, so reaching here on MySQL is a bug.
+        if let Some(filter) = &self.filter {
+            if f.serializer.is_mysql() {
+                panic!("MySQL does not support partial indexes; filter={filter:?}");
+            }
+
+            fmt!(&mut f, " WHERE " filter.as_str());
+        }
     }
 }
 

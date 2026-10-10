@@ -47,6 +47,7 @@ fn index(table: usize, position: usize, name: &str, column: usize, primary_key: 
         }],
         unique: primary_key,
         primary_key,
+        filter: None,
     }
 }
 

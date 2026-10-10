@@ -40,8 +40,10 @@ impl Normalize<'_> {
             .filter_map(|order| resolve_order_column(mapping, &order.expr))
             .collect();
 
+        // A partial unique index leaves ties among the rows it does not
+        // cover, so it does not make an ordering unambiguous.
         let unambiguous = table.indices.iter().any(|index| {
-            (index.unique || index.primary_key)
+            (index.is_unique_over_all_rows() || index.primary_key)
                 && index
                     .columns
                     .iter()

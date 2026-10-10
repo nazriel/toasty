@@ -303,6 +303,7 @@ async fn drift_lists_missing_unexpected_and_changed_indices() {
         name: name.to_string(),
         unique,
         columns: columns.iter().map(|c| Some(c.to_string())).collect(),
+        filter: None,
     };
     assert_eq!(
         drift.differences,

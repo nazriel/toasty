@@ -113,7 +113,8 @@ pub enum SchemaDifference {
         index: IndexShape,
     },
 
-    /// An index exists on both sides with a different uniqueness or columns.
+    /// An index exists on both sides with a different uniqueness, columns or
+    /// partial-index predicate.
     ChangedIndex {
         /// The table name.
         table: String,
@@ -134,6 +135,8 @@ pub struct IndexShape {
     /// The indexed columns, in index order. `None` stands for an indexed
     /// expression.
     pub columns: Vec<Option<String>>,
+    /// A partial index's predicate. `None` for an index over every row.
+    pub filter: Option<String>,
 }
 
 impl SchemaDrift {
@@ -141,8 +144,10 @@ impl SchemaDrift {
     /// snapshot's, with the schema `actual` a database reported.
     ///
     /// Tables, columns and indices are matched by name. A column is compared
-    /// by its nullability; an index by its uniqueness and its columns, in
-    /// order. A primary key's index is not required: SQL drivers create the
+    /// by its nullability; an index by its uniqueness, its columns, in order,
+    /// and a partial index's predicate. The predicate is compared as text,
+    /// so it must be recorded as the database reports it (toasty creates the
+    /// index with the text the schema declares). A primary key's index is not required: SQL drivers create the
     /// key as part of the table, and the migration generator emits no
     /// statement for it. When the database does have an index by that name,
     /// it is compared like any other.
@@ -192,6 +197,10 @@ impl SchemaDrift {
                         .iter()
                         .map(|column| Some(expected.column(column.column).name.clone()))
                         .collect(),
+                    filter: declared
+                        .filter
+                        .as_ref()
+                        .map(|filter| filter.trim().to_string()),
                 };
                 match found.index(&index.name) {
                     None if declared.primary_key => {}
@@ -248,6 +257,7 @@ impl From<&super::DatabaseIndex> for IndexShape {
             name: index.name.clone(),
             unique: index.unique,
             columns: index.columns.clone(),
+            filter: index.filter.clone(),
         }
     }
 }
@@ -320,6 +330,9 @@ impl fmt::Display for IndexShape {
                 Some(name) => write!(f, "{name:?}")?,
                 None => f.write_str("an expression")?,
             }
+        }
+        if let Some(filter) = &self.filter {
+            write!(f, " where {filter}")?;
         }
         Ok(())
     }

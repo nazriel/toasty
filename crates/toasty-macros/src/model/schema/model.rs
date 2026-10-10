@@ -322,6 +322,7 @@ impl Model {
                 unique: true,
                 primary_key: true,
                 name: model_attr.key.as_ref().and_then(|k| k.name.clone()),
+                filter: None,
             });
 
             // Iterate all extras rather than bailing on the first so every
@@ -403,6 +404,7 @@ impl Model {
                 unique: index_attr.unique,
                 primary_key: false,
                 name: index_attr.name.clone(),
+                filter: index_attr.filter.as_ref().map(syn::LitStr::value),
             });
         }
 
@@ -817,6 +819,14 @@ fn parse_enum_index_attr(
             return Ok(());
         }
 
+        if meta.path.is_ident("filter") && meta.input.peek(syn::Token![=]) {
+            return Err(syn::Error::new_spanned(
+                &meta.path,
+                "`filter` is not supported on an enum-level index; declare the \
+                 partial index on the model that embeds the enum",
+            ));
+        }
+
         let field = resolve_enum_index_field(&meta.path, fields, variants)?;
 
         let scope = if index_fields.is_empty() {
@@ -841,6 +851,7 @@ fn parse_enum_index_attr(
         unique,
         primary_key: false,
         name,
+        filter: None,
     })
 }
 
@@ -947,6 +958,7 @@ fn collect_field_indices(fields: &[Field], indices: &mut Vec<Index>) {
                 unique: field.attrs.unique,
                 primary_key: false,
                 name: None,
+                filter: None,
             });
         }
     }

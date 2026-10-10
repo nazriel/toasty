@@ -1,0 +1,11 @@
+error: `filter` must be a non-empty SQL predicate
+ --> tests/ui/partial_index_empty_filter.rs:5:32
+  |
+5 | #[unique(owner, name, filter = "  ")]
+  |                                ^^^^
+
+error: `filter` specified more than once
+ --> tests/ui/partial_index_empty_filter.rs:6:46
+  |
+6 | #[index(name, filter = "deleted_at IS NULL", filter = "owner > 0")]
+  |                                              ^^^^^^

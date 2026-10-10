@@ -13,6 +13,19 @@ pub(crate) struct Index {
     /// `#[key(name = "...", ...)]`. When `None`, the schema builder generates
     /// a name automatically.
     pub(crate) name: Option<String>,
+
+    /// The predicate of a partial index from `filter = "..."`. `None` for an
+    /// index over every row.
+    pub(crate) filter: Option<String>,
+}
+
+impl Index {
+    /// A partial index holds only the rows its filter admits, so a query
+    /// without that predicate cannot use it, and a partial unique index does
+    /// not make its fields unique across the table.
+    pub(crate) fn is_partial(&self) -> bool {
+        self.filter.is_some()
+    }
 }
 
 #[derive(Debug)]

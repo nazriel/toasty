@@ -17,6 +17,7 @@ fn mysql_constructor_is_offline() {
     assert!(!cap.returning_from_insert);
     assert!(!cap.returning_from_update);
     assert!(!cap.returning_from_delete);
+    assert!(!cap.partial_index);
 
     let error = toasty_driver_mysql::MySQL::new("mariadb://localhost/test").unwrap_err();
     assert!(error.is_invalid_connection_url());
@@ -35,6 +36,7 @@ fn mariadb_constructor_is_offline() {
     assert!(cap.returning_from_insert);
     assert!(!cap.returning_from_update);
     assert!(!cap.returning_from_delete);
+    assert!(!cap.partial_index);
 
     for url in [
         "mysql://localhost/test",

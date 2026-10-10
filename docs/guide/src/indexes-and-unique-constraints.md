@@ -481,6 +481,116 @@ condition, and that mechanism enforces a single column. Declaring a multi-column
 created. A single-column `#[unique(field)]` works on DynamoDB and is equivalent
 to a field-level `#[unique]`.
 
+## Partial indexes
+
+A struct-level `#[index(...)]` or `#[unique(...)]` takes `filter = "..."`, a
+SQL predicate over the table's columns. The database then indexes only the rows
+for which the predicate holds. A partial unique index enforces uniqueness among
+those rows alone: here a coupon's code is unique per campaign among the coupons that
+are not redeemed, and any number of redeemed coupons may share it.
+
+```rust
+# use toasty::Model;
+#[derive(Debug, toasty::Model)]
+#[unique(campaign_id, code, filter = "redeemed_at IS NULL")]
+struct Coupon {
+    #[key]
+    #[auto]
+    id: u64,
+    campaign_id: u64,
+    code: String,
+    redeemed_at: Option<jiff::Timestamp>,
+}
+```
+
+```sql
+CREATE UNIQUE INDEX idx_coupons_campaign_id_code
+    ON coupons (campaign_id, code) WHERE redeemed_at IS NULL;
+```
+
+```rust
+# use toasty::Model;
+# #[derive(Debug, toasty::Model)]
+# #[unique(campaign_id, code, filter = "redeemed_at IS NULL")]
+# struct Coupon {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     campaign_id: u64,
+#     code: String,
+#     redeemed_at: Option<jiff::Timestamp>,
+# }
+# async fn __example(mut db: toasty::Db) -> toasty::Result<()> {
+let mut coupon = toasty::create!(Coupon { campaign_id: 1, code: "SPRING" })
+    .exec(&mut db)
+    .await?;
+
+// A second unredeemed coupon with the same code is a unique violation.
+let duplicate = toasty::create!(Coupon { campaign_id: 1, code: "SPRING" })
+    .exec(&mut db)
+    .await;
+assert!(duplicate.is_err());
+
+// Once the first is redeemed, the code is free again.
+coupon
+    .update()
+    .redeemed_at(Some(jiff::Timestamp::now()))
+    .exec(&mut db)
+    .await?;
+toasty::create!(Coupon { campaign_id: 1, code: "SPRING" })
+    .exec(&mut db)
+    .await?;
+# Ok(())
+# }
+```
+
+The predicate is passed to the database as written. It names columns, not
+fields (they differ when a field is renamed with `#[column(...)]`), and it is
+written in the database's own SQL; Toasty does not check or translate it
+beyond rejecting an empty string. Toasty records it in the migration snapshot,
+so changing it generates a migration that drops and recreates the index, and
+`toasty::migration::SchemaDrift` reports an index whose predicate differs, as
+text, from the one the snapshot records.
+
+A partial index serves only queries that imply its predicate, and a partial
+unique index does not make its fields unique across the table. So Toasty
+generates no `get_by_*`, `filter_by_*`, `update_by_*`, `delete_by_*` or
+`upsert_by_*` methods from a partial index, and never relies on one where it
+needs a unique key (an upsert's conflict target, a tie-free sort order).
+Query its rows with `filter` and the predicate written out:
+
+```rust
+# use toasty::Model;
+# #[derive(Debug, toasty::Model)]
+# #[unique(campaign_id, code, filter = "redeemed_at IS NULL")]
+# struct Coupon {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     campaign_id: u64,
+#     code: String,
+#     redeemed_at: Option<jiff::Timestamp>,
+# }
+# async fn __example(mut db: toasty::Db) -> toasty::Result<()> {
+let live = Coupon::filter(
+    Coupon::fields()
+        .campaign_id()
+        .eq(1)
+        .and(Coupon::fields().code().eq("SPRING"))
+        .and(Coupon::fields().redeemed_at().is_none()),
+)
+.first()
+.exec(&mut db)
+.await?;
+# Ok(())
+# }
+```
+
+SQLite, Turso and PostgreSQL have partial indexes. MySQL, MariaDB and DynamoDB
+do not, and a schema that declares one is rejected with an
+`unsupported_feature` error when it is built. `#[key(...)]` and enum-level
+indexes do not take `filter`.
+
 ## Indexing newtype fields
 
 Newtype embedded structs (single unnamed field, e.g., `struct Email(String)`)
@@ -497,7 +607,7 @@ struct User {
     #[auto]
     id: u64,
 
-    name: String,
+    code: String,
 
     #[unique]
     email: Email,

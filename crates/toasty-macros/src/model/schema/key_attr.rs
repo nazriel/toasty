@@ -4,6 +4,11 @@ pub(crate) struct KeyAttr {
     pub(crate) local: Vec<syn::Ident>,
     pub(crate) name: Option<String>,
 
+    /// The predicate of a partial index, from `filter = "..."`: raw SQL over
+    /// the table's columns. Only `#[index(...)]` and `#[unique(...)]` accept
+    /// it; `#[key(...)]` rejects it.
+    pub(crate) filter: Option<syn::LitStr>,
+
     /// When `true`, the index enforces uniqueness. Set for `#[unique(...)]`
     /// attributes; always `false` for `#[key(...)]` and `#[index(...)]`.
     pub(crate) unique: bool,
@@ -15,6 +20,7 @@ impl KeyAttr {
         let mut local = vec![];
         let mut simple_fields = vec![];
         let mut name: Option<String> = None;
+        let mut filter: Option<syn::LitStr> = None;
         let mut has_named = false;
 
         attr.parse_nested_meta(|meta| {
@@ -40,6 +46,30 @@ impl KeyAttr {
                 }
 
                 name = Some(value_str);
+                return Ok(());
+            }
+
+            // `filter = "..."` — the predicate of a partial index. As with
+            // `name`, the `=` token tells it apart from a field called
+            // `filter`. The SQL is passed to the database as written.
+            if meta.path.is_ident("filter") && meta.input.peek(syn::Token![=]) {
+                if filter.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &meta.path,
+                        "`filter` specified more than once",
+                    ));
+                }
+
+                let value: syn::LitStr = meta.value()?.parse()?;
+
+                if value.value().trim().is_empty() {
+                    return Err(syn::Error::new_spanned(
+                        &value,
+                        "`filter` must be a non-empty SQL predicate",
+                    ));
+                }
+
+                filter = Some(value);
                 return Ok(());
             }
 
@@ -145,6 +175,7 @@ impl KeyAttr {
             partition,
             local,
             name,
+            filter,
             unique: false,
         })
     }

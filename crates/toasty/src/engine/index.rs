@@ -44,6 +44,9 @@ pub(crate) fn plan_index_path<'a>(
     let index_match = table
         .indices
         .iter()
+        // A partial index holds only the rows its predicate admits, so it
+        // cannot answer a filter that does not imply that predicate.
+        .filter(|index| !index.is_partial())
         .filter_map(|index| {
             let mut index_match = IndexMatch {
                 index,

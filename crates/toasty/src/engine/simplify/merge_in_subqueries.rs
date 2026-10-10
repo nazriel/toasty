@@ -158,7 +158,7 @@ impl Simplify<'_> {
                     return false;
                 };
                 model.indices.iter().any(|index| {
-                    index.unique
+                    index.is_unique_over_all_rows()
                         && !index.fields.is_empty()
                         && index
                             .fields
@@ -188,7 +188,7 @@ impl Simplify<'_> {
                     return false;
                 };
                 table.indices.iter().any(|index| {
-                    index.unique
+                    index.is_unique_over_all_rows()
                         && !index.columns.is_empty()
                         && index
                             .columns

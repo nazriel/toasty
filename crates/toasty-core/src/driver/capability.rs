@@ -355,6 +355,12 @@ pub struct Capability {
     /// whose equality semantics preserve element order and multiplicity.
     pub unique_list_index: bool,
 
+    /// Whether the database has partial indexes (`CREATE INDEX ... WHERE
+    /// <predicate>`), which index only the rows the predicate admits. A
+    /// schema that declares one on a database without them is rejected when
+    /// the schema is built.
+    pub partial_index: bool,
+
     /// Whether the driver can store a `#[document]` collection field — a
     /// `Vec<T>` of an embedded struct — as a single document column
     /// (`jsonb` / `JSON` on the SQL backends). Used by the schema builder as
@@ -751,6 +757,10 @@ impl Capability {
         unique_list_index: false,
         document_collections: true,
 
+        // SQLite (3.8.0+) and PostgreSQL index a subset of rows with
+        // `CREATE INDEX ... WHERE`.
+        partial_index: true,
+
         // SQLite renders `IsSuperset` / `Intersects` as `json_each`
         // subqueries that accept any rhs expression.
         native_array_set_predicates: true,
@@ -889,6 +899,9 @@ impl Capability {
         glob_starts_with: false,
         binary_like_starts_with: true,
 
+        // Neither MySQL nor MariaDB has partial indexes.
+        partial_index: false,
+
         ..Self::SQLITE
     };
 
@@ -1008,6 +1021,8 @@ impl Capability {
         native_array: false,
         vec_scalar: true,
         unique_list_index: false,
+        // Secondary indexes cover every item that has the key attributes.
+        partial_index: false,
         // `#[document]` embeds store as a native Map `M` attribute (a
         // `Vec<embed>` collection as a List `L` of Maps). DynamoDB caps
         // attribute nesting at 32 levels; documents deeper than that are not

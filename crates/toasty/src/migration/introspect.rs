@@ -8,8 +8,8 @@ use crate::{Db, Dialect, Error, Executor, Result, stmt::Value};
 /// to check that a migration produced the schema its snapshot claims.
 ///
 /// Only what every SQL database can report is read: names, nullability,
-/// uniqueness and the indexed columns. Storage types are driver-specific
-/// and are not compared.
+/// uniqueness, the indexed columns and a partial index's predicate. Storage
+/// types are driver-specific and are not compared.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DatabaseSchema {
     /// The tables, ordered by name.
@@ -60,6 +60,11 @@ pub struct DatabaseIndex {
     /// The indexed columns, in index order. `None` stands for an indexed
     /// expression.
     pub columns: Vec<Option<String>>,
+
+    /// A partial index's predicate, the text after `WHERE` in the statement
+    /// that created it, as the database recorded it. `None` for an index over
+    /// every row.
+    pub filter: Option<String>,
 }
 
 impl DatabaseSchema {
@@ -167,7 +172,7 @@ async fn read_sqlite(executor: &mut dyn Executor) -> Result<DatabaseSchema> {
         let mut indices = Vec::new();
         for row in rows(
             executor,
-            "SELECT name, \"unique\" FROM pragma_index_list(?1) ORDER BY name",
+            "SELECT name, \"unique\", partial FROM pragma_index_list(?1) ORDER BY name",
             &[&name],
         )
         .await?
@@ -191,10 +196,33 @@ async fn read_sqlite(executor: &mut dyn Executor) -> Result<DatabaseSchema> {
                     _ => Some(text(&row, 0)?),
                 });
             }
+            // SQLite keeps no parsed form of a partial index's predicate,
+            // only the `CREATE INDEX` statement as it was written.
+            let filter = if integer(&row, 2)? != 0 {
+                let created = rows(
+                    executor,
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    &[&index],
+                )
+                .await?;
+                let sql = created
+                    .first()
+                    .map(|row| text(row, 0))
+                    .transpose()?
+                    .unwrap_or_default();
+                Some(index_predicate(&sql).ok_or_else(|| {
+                    Error::invalid_result(format!(
+                        "partial index {index:?} has no WHERE clause in {sql:?}"
+                    ))
+                })?)
+            } else {
+                None
+            };
             indices.push(DatabaseIndex {
                 name: index,
                 unique: integer(&row, 1)? != 0,
                 columns: indexed,
+                filter,
             });
         }
 
@@ -206,6 +234,51 @@ async fn read_sqlite(executor: &mut dyn Executor) -> Result<DatabaseSchema> {
     }
 
     Ok(DatabaseSchema { tables })
+}
+
+/// The predicate of a `CREATE INDEX ... WHERE <predicate>` statement: the
+/// text after the first `WHERE` keyword outside quotes and parentheses,
+/// trimmed. `None` when the statement has no such `WHERE`.
+fn index_predicate(sql: &str) -> Option<String> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                // A doubled quote inside a quoted span is an escaped quote,
+                // so skipping to each closing quote in turn is enough.
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+            }
+            b'[' => {
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0
+                && sql[i..]
+                    .get(..5)
+                    .is_some_and(|word| word.eq_ignore_ascii_case("where"))
+                && (i == 0 || !is_identifier_byte(bytes[i - 1]))
+                && bytes.get(i + 5).is_none_or(|b| !is_identifier_byte(*b)) =>
+            {
+                let predicate = sql[i + 5..].trim().trim_end_matches(';').trim_end();
+                return Some(predicate.to_string());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
 }
 
 async fn rows(executor: &mut dyn Executor, sql: &str, params: &[&str]) -> Result<Vec<Value>> {
@@ -242,5 +315,40 @@ fn integer(row: &Value, index: usize) -> Result<i64> {
         value => Err(Error::invalid_result(format!(
             "schema query returned {value:?} where an integer was expected"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_predicate;
+
+    #[test]
+    fn index_predicate_is_the_text_after_where() {
+        assert_eq!(
+            index_predicate(
+                r#"CREATE UNIQUE INDEX "idx" ON "tokens" ("owner", "name") WHERE revoked_at IS NULL"#
+            )
+            .as_deref(),
+            Some("revoked_at IS NULL"),
+        );
+    }
+
+    #[test]
+    fn index_predicate_ignores_where_inside_quotes_and_parentheses() {
+        assert_eq!(
+            index_predicate(
+                r#"CREATE INDEX "where" ON "t" ("where", "a_where") WHERE "where" = 'a where b' AND (x > 1)"#
+            )
+            .as_deref(),
+            Some(r#""where" = 'a where b' AND (x > 1)"#),
+        );
+    }
+
+    #[test]
+    fn index_predicate_is_none_without_where() {
+        assert_eq!(
+            index_predicate(r#"CREATE INDEX "nowhere" ON "t" ("somewhere")"#),
+            None
+        );
     }
 }

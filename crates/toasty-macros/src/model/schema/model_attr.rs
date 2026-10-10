@@ -26,7 +26,16 @@ impl ModelAttr {
                     errs.push(syn::Error::new_spanned(attr, "duplicate #[key] attribute"));
                 } else {
                     match KeyAttr::from_ast(attr, names) {
-                        Ok(key_attr) => self.key = Some(key_attr),
+                        Ok(key_attr) => {
+                            if let Some(filter) = &key_attr.filter {
+                                errs.push(syn::Error::new_spanned(
+                                    filter,
+                                    "a primary key cannot be partial; `filter` is only \
+                                     accepted by `#[index(...)]` and `#[unique(...)]`",
+                                ));
+                            }
+                            self.key = Some(key_attr);
+                        }
                         Err(e) => errs.push(e),
                     }
                 }

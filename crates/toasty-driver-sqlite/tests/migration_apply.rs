@@ -52,6 +52,7 @@ fn make_index(table_id: usize, index: usize, name: &str, columns: &[usize], uniq
             .collect(),
         unique,
         primary_key: false,
+        filter: None,
     }
 }
 

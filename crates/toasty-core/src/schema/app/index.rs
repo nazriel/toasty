@@ -26,6 +26,7 @@ use crate::schema::db::{IndexOp, IndexScope};
 ///     }],
 ///     unique: true,
 ///     primary_key: true,
+///     filter: None,
 /// };
 /// assert!(index.unique);
 /// assert!(index.primary_key);
@@ -48,6 +49,27 @@ pub struct Index {
 
     /// When `true`, this index represents the model's primary key.
     pub primary_key: bool,
+
+    /// The predicate of a partial index, from `#[index(..., filter = "...")]`
+    /// or `#[unique(..., filter = "...")]`: a raw SQL boolean expression over
+    /// the table's columns. Only rows for which it holds are indexed, so a
+    /// partial unique index enforces uniqueness among those rows alone.
+    /// `None` for an index over every row.
+    pub filter: Option<String>,
+}
+
+impl Index {
+    /// Returns `true` if this is a partial index: it holds only the rows its
+    /// [`filter`](Self::filter) admits.
+    pub fn is_partial(&self) -> bool {
+        self.filter.is_some()
+    }
+
+    /// Returns `true` if the indexed fields are unique across every record of
+    /// the model: a unique index that is not partial.
+    pub fn is_unique_over_all_rows(&self) -> bool {
+        self.unique && !self.is_partial()
+    }
 }
 
 /// Uniquely identifies an [`Index`] within a schema.

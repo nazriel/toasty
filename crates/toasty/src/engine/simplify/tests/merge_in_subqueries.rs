@@ -44,8 +44,23 @@ struct Item {
     value: String,
 }
 
+#[allow(dead_code)]
+#[derive(toasty::Model)]
+#[unique(handle, filter = "closed = 0")]
+struct Account {
+    #[key]
+    id: i64,
+    handle: String,
+    closed: bool,
+}
+
 fn schema() -> toasty_core::Schema {
-    test_schema_with(&[User::schema(), Post::schema(), Item::schema()])
+    test_schema_with(&[
+        User::schema(),
+        Post::schema(),
+        Item::schema(),
+        Account::schema(),
+    ])
 }
 
 fn field<M: Model>(index: usize) -> Expr {
@@ -183,6 +198,18 @@ fn combines_complete_composite_key_but_not_partial_key() {
 
     let partial = |filter| Expr::in_subquery(1, query(Item::id(), field::<Item>(1), filter));
     let input = Expr::and(partial(a), partial(b));
+    assert_eq!(simplify_filter(input.clone()), input);
+}
+
+#[test]
+fn preserves_a_key_unique_only_under_a_partial_index() {
+    // `handle` is unique among open accounts alone, so two subqueries over
+    // it may each match a different closed account.
+    let by_handle =
+        |filter| Expr::in_subquery("a", query(Account::id(), field::<Account>(1), filter));
+    let open = Expr::not(field::<Account>(2));
+    let id = Expr::eq(field::<Account>(0), 7);
+    let input = Expr::and(by_handle(open), by_handle(id));
     assert_eq!(simplify_filter(input.clone()), input);
 }
 

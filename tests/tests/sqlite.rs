@@ -285,6 +285,18 @@ mod constraint_violation {
         code: String,
     }
 
+    #[derive(Debug, toasty::Model)]
+    #[unique(owner, name, filter = "revoked_at IS NULL")]
+    struct Token {
+        #[key]
+        #[auto]
+        id: i64,
+
+        owner: i64,
+        name: String,
+        revoked_at: Option<i64>,
+    }
+
     async fn db(models: toasty::ModelSet) -> toasty::Db {
         let db = toasty::Db::builder()
             .models(models)
@@ -366,6 +378,43 @@ mod constraint_violation {
         let violation = err.as_constraint_violation().unwrap();
         assert_eq!(violation.table(), Some(codes.as_str()));
         assert_eq!(violation.columns(), ["code"]);
+    }
+
+    #[tokio::test]
+    async fn partial_unique_index_violation_is_a_unique_violation_and_a_revoked_row_is_not() {
+        let mut db = db(toasty::models!(Token)).await;
+        let tokens = db.schema().db.tables[0].name.clone();
+
+        let mut live = Token::create()
+            .owner(1)
+            .name("deploy")
+            .exec(&mut db)
+            .await
+            .unwrap();
+        let err = Token::create()
+            .owner(1)
+            .name("deploy")
+            .exec(&mut db)
+            .await
+            .unwrap_err();
+
+        assert!(err.is_unique_violation(), "{err}");
+        let violation = err.as_constraint_violation().unwrap();
+        assert_eq!(violation.table(), Some(tokens.as_str()));
+        assert_eq!(violation.columns(), ["owner", "name"]);
+
+        // A revoked row and a live row with the same key are both accepted.
+        live.update()
+            .revoked_at(Some(1))
+            .exec(&mut db)
+            .await
+            .unwrap();
+        Token::create()
+            .owner(1)
+            .name("deploy")
+            .exec(&mut db)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -602,6 +602,77 @@ struct TestCx {
     capability: &'static Capability,
 }
 
+/// `handle` is indexed only among the accounts that are not closed.
+#[allow(dead_code)]
+#[derive(toasty::Model)]
+#[index(handle, filter = "closed = 0")]
+struct Account {
+    #[key]
+    id: String,
+    handle: String,
+    closed: bool,
+}
+
+#[test]
+fn a_partial_index_builds_only_where_the_driver_has_partial_indexes() {
+    for capability in [&Capability::SQLITE, &Capability::POSTGRESQL] {
+        let app_schema = app::Schema::from_macro([Account::schema()]).unwrap();
+        let schema = Builder::new().build(app_schema, capability).unwrap();
+        let index = schema.db.tables[0]
+            .indices
+            .iter()
+            .find(|index| !index.primary_key)
+            .unwrap();
+        assert_eq!(index.filter.as_deref(), Some("closed = 0"));
+    }
+
+    for capability in [
+        &Capability::MYSQL,
+        &Capability::MARIADB,
+        &Capability::DYNAMODB,
+    ] {
+        let app_schema = app::Schema::from_macro([Account::schema()]).unwrap();
+        let err = Builder::new().build(app_schema, capability).unwrap_err();
+        assert!(err.is_unsupported_feature(), "{err}");
+        assert!(
+            err.to_string().contains(&format!(
+                "{} does not support partial indexes",
+                capability.driver_name
+            )),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn index_selection_never_picks_a_partial_index() {
+    // A key-value driver that had partial indexes still could not answer
+    // `handle = ?` from one: the filter does not imply `closed = 0`.
+    static PARTIAL_KV: Capability = Capability {
+        partial_index: true,
+        ..Capability::DYNAMODB
+    };
+    let app_schema = app::Schema::from_macro([Account::schema()]).unwrap();
+    let schema = Builder::new().build(app_schema, &PARTIAL_KV).unwrap();
+    let cx = TestCx {
+        schema,
+        capability: &PARTIAL_KV,
+    };
+
+    let filter = stmt::Expr::eq(
+        stmt::Expr::Reference(stmt::ExprReference::column(0, 1)),
+        stmt::Expr::Value(stmt::Value::from("alice")),
+    );
+    let stmt = cx.basic_query_with_filter(filter);
+
+    // With no usable index the driver falls back to a scan.
+    assert!(
+        plan_index_path(&cx.schema, cx.capability, &stmt)
+            .unwrap()
+            .is_none()
+    );
+}
+
 fn sqlite_test_cx() -> TestCx {
     test_cx_with_capability(&Capability::SQLITE)
 }

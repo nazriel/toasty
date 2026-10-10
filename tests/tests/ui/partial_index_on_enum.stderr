@@ -1,0 +1,5 @@
+error: `filter` is not supported on an enum-level index; declare the partial index on the model that embeds the enum
+ --> tests/ui/partial_index_on_enum.rs:5:16
+  |
+5 | #[unique(name, filter = "name IS NOT NULL")]
+  |                ^^^^^^

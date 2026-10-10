@@ -50,6 +50,7 @@ fn make_index(
             .collect(),
         unique,
         primary_key: false,
+        filter: None,
     }
 }
 
@@ -464,4 +465,60 @@ fn multiple_operations() {
 
     let d = diff::Index::diff(&cx, &from_indices, &to_indices);
     assert_eq!(d.len(), 4);
+}
+
+#[test]
+fn filter_change_is_an_alter() {
+    let columns = vec![make_column(0, 0, "id"), make_column(0, 1, "name")];
+    let partial = |filter: Option<&str>| {
+        let mut index = make_index(
+            0,
+            0,
+            "idx_name",
+            vec![(1, IndexOp::Eq, IndexScope::Local)],
+            true,
+        );
+        index.filter = filter.map(str::to_string);
+        index
+    };
+
+    for (from, to) in [
+        (None, Some("deleted_at IS NULL")),
+        (Some("deleted_at IS NULL"), Some("deleted_at IS NOT NULL")),
+        (Some("deleted_at IS NULL"), None),
+    ] {
+        let from_indices = vec![partial(from)];
+        let to_indices = vec![partial(to)];
+        let from_schema = make_schema_with_indices(0, columns.clone(), from_indices.clone());
+        let to_schema = make_schema_with_indices(0, columns.clone(), to_indices.clone());
+        let hints = diff::RenameHints::new();
+        let cx = diff::Context::new(&from_schema, &to_schema, &hints);
+
+        let d = diff::Index::diff(&cx, &from_indices, &to_indices);
+        assert_eq!(d.len(), 1, "{from:?} -> {to:?}");
+        let diff::Index::Alter { previous, next } = &d[0] else {
+            panic!("{from:?} -> {to:?} should be an alter");
+        };
+        assert_eq!(previous.filter.as_deref(), from);
+        assert_eq!(next.filter.as_deref(), to);
+    }
+}
+
+#[test]
+fn same_filter_is_no_diff() {
+    let columns = vec![make_column(0, 0, "id"), make_column(0, 1, "name")];
+    let mut index = make_index(
+        0,
+        0,
+        "idx_name",
+        vec![(1, IndexOp::Eq, IndexScope::Local)],
+        true,
+    );
+    index.filter = Some("deleted_at IS NULL".to_string());
+    let indices = vec![index];
+    let schema = make_schema_with_indices(0, columns, indices.clone());
+    let hints = diff::RenameHints::new();
+    let cx = diff::Context::new(&schema, &schema, &hints);
+
+    assert!(diff::Index::diff(&cx, &indices, &indices).is_empty());
 }

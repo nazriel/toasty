@@ -25,6 +25,7 @@ use std::fmt;
 ///     }],
 ///     unique: true,
 ///     primary_key: false,
+///     filter: None,
 /// };
 ///
 /// assert!(index.unique);
@@ -52,6 +53,36 @@ pub struct Index {
     /// When `true`, the index indexes the model's primary key fields.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "is_false"))]
     pub primary_key: bool,
+
+    /// The predicate of a partial index (`CREATE INDEX ... WHERE <filter>`):
+    /// a raw SQL boolean expression over the table's columns, passed to the
+    /// database as written. Only rows for which it holds are indexed, so a
+    /// partial unique index enforces uniqueness among those rows alone.
+    /// `None` for an index over every row.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub filter: Option<String>,
+}
+
+impl Index {
+    /// Returns `true` if this is a partial index: it holds only the rows its
+    /// [`filter`](Self::filter) admits.
+    ///
+    /// A partial unique index does not make its columns unique across the
+    /// table, so nothing that relies on uniqueness (an upsert's conflict
+    /// target, a tie-free ordering, a single-row lookup) may treat it as a
+    /// unique key.
+    pub fn is_partial(&self) -> bool {
+        self.filter.is_some()
+    }
+
+    /// Returns `true` if the indexed columns are unique across every row of
+    /// the table: a unique index that is not partial.
+    pub fn is_unique_over_all_rows(&self) -> bool {
+        self.unique && !self.is_partial()
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -209,6 +240,7 @@ mod serde_tests {
             }],
             unique: false,
             primary_key: false,
+            filter: None,
         }
     }
 
@@ -245,6 +277,43 @@ mod serde_tests {
         let idx: Index = toml::from_str(toml).unwrap();
         assert!(!idx.unique);
         assert!(!idx.primary_key);
+        assert_eq!(idx.filter, None);
+    }
+
+    #[test]
+    fn no_filter_is_omitted() {
+        let toml = toml::to_string(&base_index()).unwrap();
+        assert!(!toml.contains("filter"), "toml: {toml}");
+    }
+
+    #[test]
+    fn round_trip_with_filter() {
+        let original = Index {
+            unique: true,
+            filter: Some("deleted_at IS NULL".to_string()),
+            ..base_index()
+        };
+        let toml = toml::to_string(&original).unwrap();
+        assert!(
+            toml.contains(r#"filter = "deleted_at IS NULL""#),
+            "toml: {toml}"
+        );
+        let decoded: Index = toml::from_str(&toml).unwrap();
+        assert_eq!(decoded.filter, original.filter);
+        assert!(decoded.is_partial());
+        assert!(!decoded.is_unique_over_all_rows());
+    }
+
+    #[test]
+    fn round_trip_without_filter() {
+        let original = Index {
+            unique: true,
+            ..base_index()
+        };
+        let decoded: Index = toml::from_str(&toml::to_string(&original).unwrap()).unwrap();
+        assert_eq!(decoded.filter, None);
+        assert!(!decoded.is_partial());
+        assert!(decoded.is_unique_over_all_rows());
     }
 
     #[test]

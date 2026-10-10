@@ -20,7 +20,10 @@ impl Upsert {
         model
             .indices
             .iter()
-            .filter(|index| index.unique)
+            // A partial unique index is no conflict target: `ON CONFLICT
+            // (cols)` matches it only when the statement repeats its
+            // predicate, and the fields are not unique across the table.
+            .filter(|index| index.unique && !index.is_partial())
             .filter_map(|index| {
                 let target_fields = index
                     .fields

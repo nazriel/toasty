@@ -335,6 +335,10 @@ impl Expand<'_> {
                     Some(value) => quote!(Some(#value.to_string())),
                     None => quote!(None),
                 };
+                let filter = match &model_index.filter {
+                    Some(value) => quote!(Some(#value.to_string())),
+                    None => quote!(None),
+                };
 
                 let fields = model_index.fields.iter().map(|index_field| {
                     let field_tokenized = util::int(index_field.field);
@@ -367,6 +371,7 @@ impl Expand<'_> {
                         fields: vec![ #( #fields ),* ],
                         unique: #unique,
                         primary_key: #primary_key,
+                        filter: #filter,
                     }
                 }
             });

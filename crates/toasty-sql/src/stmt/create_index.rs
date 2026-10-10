@@ -19,6 +19,10 @@ pub struct CreateIndex {
 
     /// When true, the index is unique
     pub unique: bool,
+
+    /// The predicate of a partial index, rendered verbatim after `WHERE`.
+    /// `None` indexes every row.
+    pub filter: Option<String>,
 }
 
 impl Statement {
@@ -39,6 +43,7 @@ impl Statement {
                 })
                 .collect(),
             unique: index.unique,
+            filter: index.filter.clone(),
         }
         .into()
     }

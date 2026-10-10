@@ -265,6 +265,31 @@ impl BuildTableFromModels<'_> {
         out: &mut Vec<db::Index>,
     ) -> Result<()> {
         for app_index in indices {
+            if let Some(filter) = &app_index.filter {
+                let model_name = self.app.model(app_index.id.model).name();
+
+                if filter.trim().is_empty() {
+                    return Err(Error::invalid_schema(format!(
+                        "model `{model_name}` declares a partial index with an empty filter"
+                    )));
+                }
+
+                if app_index.primary_key {
+                    return Err(Error::invalid_schema(format!(
+                        "model `{model_name}` declares a partial primary key; a primary key \
+                         covers every row"
+                    )));
+                }
+
+                if !self.db.partial_index {
+                    return Err(Error::unsupported_feature(format!(
+                        "model `{model_name}` declares a partial index (`filter = {filter:?}`), \
+                         but {} does not support partial indexes",
+                        self.db.driver_name
+                    )));
+                }
+            }
+
             let mut index = db::Index {
                 id: IndexId {
                     table: self.table.id,
@@ -275,6 +300,7 @@ impl BuildTableFromModels<'_> {
                 columns: vec![],
                 unique: app_index.unique,
                 primary_key: app_index.primary_key,
+                filter: app_index.filter.clone(),
             };
 
             for index_field in &app_index.fields {

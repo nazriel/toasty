@@ -76,8 +76,10 @@ impl stmt::Visit for Verify<'_, '_> {
             .iter()
             .filter_map(|projection| projection.as_slice().first().copied())
             .collect::<Vec<_>>();
+        // A partial unique index is not a conflict target: the fields are
+        // unique only among the rows its predicate admits.
         let Some(index) = model.indices.iter().find(|index| {
-            index.unique
+            index.is_unique_over_all_rows()
                 && index.fields.len() == target.len()
                 && index
                     .fields
