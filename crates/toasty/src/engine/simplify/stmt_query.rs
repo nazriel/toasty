@@ -30,6 +30,13 @@ impl Simplify<'_> {
             return false;
         };
 
+        // Aggregates without grouping yield one row even over no records
+        // (a count of 0, a sum of NULL), so the database must run them.
+        if select.group_by.is_empty() && select.returning.as_project().is_some_and(reads_aggregate)
+        {
+            return false;
+        }
+
         // SQL-style predicates retain only true rows. A constant NULL
         // comparison (for example, a cleared relation key) also matches none.
         if select.filter.is_false() || select.filter.as_expr().is_value_null() {
@@ -82,4 +89,11 @@ impl Simplify<'_> {
             _ => false,
         }
     }
+}
+
+/// Whether a projection reads an aggregate of its own query.
+fn reads_aggregate(expr: &stmt::Expr) -> bool {
+    let mut found = false;
+    stmt::visit::for_each_expr(expr, |expr| found |= expr.is_aggregate());
+    found
 }

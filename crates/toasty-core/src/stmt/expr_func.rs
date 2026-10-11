@@ -1,4 +1,4 @@
-use super::{Expr, FuncCount, FuncJsonExtract, FuncLastInsertId};
+use super::{Expr, FuncAggregate, FuncCount, FuncJsonExtract, FuncLastInsertId};
 
 /// A function call expression.
 ///
@@ -9,12 +9,16 @@ use super::{Expr, FuncCount, FuncJsonExtract, FuncLastInsertId};
 /// ```text
 /// count(*)           // counts all rows
 /// count(field)       // counts non-null values
+/// sum(field)         // adds the non-null values
 /// last_insert_id()   // MySQL: get the last auto-increment ID
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprFunc {
     /// The `count` aggregate function.
     Count(FuncCount),
+
+    /// The `sum`, `avg`, `min` and `max` aggregate functions.
+    Aggregate(FuncAggregate),
 
     /// The `LAST_INSERT_ID()` function (MySQL-specific).
     ///

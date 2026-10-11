@@ -609,6 +609,10 @@ impl<'a, T: Resolve> ExprContext<'a, T> {
             Expr::Error(_) => Type::Unknown,
             Expr::Exists(_) => Type::Bool,
             Expr::Func(ExprFunc::Count(_)) => Type::U64,
+            Expr::Func(ExprFunc::Aggregate(func)) => match func.func {
+                super::AggregateFunc::Avg => Type::F64,
+                _ => self.infer_expr_ty2(args, &func.arg, returning_expr),
+            },
             Expr::Func(ExprFunc::LastInsertId(_)) => Type::I64,
             Expr::Func(ExprFunc::JsonExtract(func)) => func.ty.clone(),
             Expr::Incoming(incoming) => match incoming {

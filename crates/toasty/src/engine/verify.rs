@@ -242,6 +242,7 @@ impl stmt::Visit for Verify<'_, '_> {
         stmt::visit::visit_stmt_query(self, i);
 
         self.verify_single_query(i);
+        self.verify_aggregates(i);
         self.verify_order_by(i);
         self.verify_offset_key_matches_order_by(i);
         self.verify_limit_is_integer_literal(i);
@@ -356,6 +357,129 @@ impl Verify<'_, '_> {
                 "cursor-based pagination cannot order by a value of a related record; \
                  use limit and offset instead",
             ));
+        }
+    }
+
+    /// Aggregates (`count`, `sum`, `avg`, `min`, `max`), `group_by` and
+    /// `having` are SQL. A grouped or aggregating query yields one row per
+    /// group, so everything it reads outside an aggregate must be one of its
+    /// grouping keys. Grouping keys and aggregate arguments are primitive
+    /// fields of the queried model, or of a record reached through
+    /// `belongs_to` relations.
+    fn verify_aggregates(&mut self, i: &stmt::Query) {
+        let stmt::ExprSet::Select(select) = &i.body else {
+            return;
+        };
+        let order_by = i.order_by.as_ref().map(|o| &o.exprs[..]).unwrap_or(&[]);
+
+        let aggregates = select
+            .returning
+            .as_project()
+            .is_some_and(contains_aggregate)
+            || select.having.as_ref().is_some_and(contains_aggregate)
+            || order_by.iter().any(|expr| contains_aggregate(&expr.expr));
+        let in_filter = contains_aggregate(select.filter.as_expr());
+
+        if !aggregates && !in_filter && !select.is_grouped() {
+            return;
+        }
+
+        if !self.capability.sql() {
+            self.record(Error::unsupported_feature(format!(
+                "{} does not support aggregate queries (count, sum, avg, min, max, group_by, having)",
+                self.capability.driver_name
+            )));
+            return;
+        }
+
+        if in_filter {
+            self.record(Error::invalid_statement(
+                "an aggregate cannot be used in a filter, which is evaluated per record; \
+                 use having to filter groups",
+            ));
+            return;
+        }
+
+        let Some(source) = select.source.as_model() else {
+            return;
+        };
+
+        if !select.returning.is_project() {
+            self.record(Error::invalid_statement(
+                "a grouped query yields one row per group; choose what it reads with select(...)",
+            ));
+            return;
+        }
+
+        if matches!(i.limit, Some(stmt::Limit::Cursor(_))) {
+            self.record(Error::unsupported_feature(
+                "cursor-based pagination of a grouped or aggregating query is not supported; \
+                 use limit and offset instead",
+            ));
+            return;
+        }
+
+        for key in &select.group_by {
+            if self.column_path_field(source.id, key).is_none() {
+                self.record(Error::invalid_statement(
+                    "group_by takes field paths: a primitive field of the queried model, \
+                     or of a record reached through belongs_to relations",
+                ));
+                return;
+            }
+        }
+
+        let mut check = CheckGrouped {
+            verify: self,
+            model: source.id,
+            keys: &select.group_by,
+        };
+        if let Some(returning) = select.returning.as_project() {
+            check.visit_expr(returning);
+        }
+        if let Some(having) = &select.having {
+            check.visit_expr(having);
+        }
+        for expr in order_by {
+            check.visit_expr(&expr.expr);
+        }
+    }
+
+    /// The field `expr` reads when it is a path to a primitive field of
+    /// `model`, directly or through `belongs_to` relations.
+    fn column_path_field(&self, model: ModelId, expr: &stmt::Expr) -> Option<&app::Field> {
+        let (index, steps) = match expr {
+            stmt::Expr::Reference(stmt::ExprReference::Field { nesting: 0, index }) => {
+                (*index, &[][..])
+            }
+            stmt::Expr::Project(project) => match &*project.base {
+                stmt::Expr::Reference(stmt::ExprReference::Field { nesting: 0, index }) => {
+                    (*index, project.projection.as_slice())
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        let mut field = self.schema.app.model(model).as_root()?.fields.get(index)?;
+        for &step in steps {
+            let app::FieldTy::BelongsTo(belongs_to) = &field.ty else {
+                return None;
+            };
+            field = self
+                .schema
+                .app
+                .model(belongs_to.target)
+                .as_root()?
+                .fields
+                .get(step)?;
+        }
+
+        match &field.ty {
+            app::FieldTy::Primitive(primitive) if !matches!(primitive.ty, stmt::Type::Model(_)) => {
+                Some(field)
+            }
+            _ => None,
         }
     }
 
@@ -490,6 +614,88 @@ impl Verify<'_, '_> {
             }
         }
     }
+}
+
+/// Checks that a grouped query reads fields only as grouping keys or inside
+/// aggregates.
+struct CheckGrouped<'a, 'b, 'v> {
+    verify: &'b mut Verify<'a, 'v>,
+    model: ModelId,
+    keys: &'b [stmt::Expr],
+}
+
+impl stmt::Visit for CheckGrouped<'_, '_, '_> {
+    fn visit_expr(&mut self, expr: &stmt::Expr) {
+        if self.keys.contains(expr) {
+            return;
+        }
+
+        match expr {
+            stmt::Expr::Func(stmt::ExprFunc::Count(stmt::FuncCount { arg: None, .. })) => {}
+            stmt::Expr::Func(stmt::ExprFunc::Count(stmt::FuncCount { arg: Some(arg), .. }))
+            | stmt::Expr::Func(stmt::ExprFunc::Aggregate(stmt::FuncAggregate { arg, .. })) => {
+                if contains_aggregate(arg) {
+                    self.verify.record(Error::invalid_statement(
+                        "an aggregate cannot contain another aggregate",
+                    ));
+                } else if self.verify.column_path_field(self.model, arg).is_none() {
+                    self.verify.record(Error::invalid_statement(
+                        "an aggregate takes a field path: a primitive field of the queried \
+                         model, or of a record reached through belongs_to relations",
+                    ));
+                }
+            }
+            stmt::Expr::Reference(stmt::ExprReference::Field { nesting: 0, .. })
+            | stmt::Expr::Project(_)
+                if is_field_path(expr) =>
+            {
+                let name = self
+                    .verify
+                    .column_path_field(self.model, expr)
+                    .map(|field| format!("`{}` ", field.name))
+                    .unwrap_or_default();
+                self.verify.record(Error::invalid_statement(format!(
+                    "the field {name}is read by a grouped or aggregating query but is neither \
+                     a group_by key nor inside an aggregate"
+                )));
+            }
+            // A subquery reads its own records.
+            stmt::Expr::Stmt(_) => {}
+            _ => stmt::visit::visit_expr(self, expr),
+        }
+    }
+}
+
+/// Whether `expr` is a field path rooted at the current query's model.
+fn is_field_path(expr: &stmt::Expr) -> bool {
+    match expr {
+        stmt::Expr::Reference(stmt::ExprReference::Field { nesting: 0, .. }) => true,
+        stmt::Expr::Project(project) => is_field_path(&project.base),
+        _ => false,
+    }
+}
+
+/// Whether `expr` contains an aggregate of its own query (aggregates inside
+/// a subquery belong to the subquery).
+fn contains_aggregate(expr: &stmt::Expr) -> bool {
+    struct Find(bool);
+
+    impl stmt::Visit for Find {
+        fn visit_expr(&mut self, expr: &stmt::Expr) {
+            if self.0 || matches!(expr, stmt::Expr::Stmt(_)) {
+                return;
+            }
+            if expr.is_aggregate() {
+                self.0 = true;
+                return;
+            }
+            stmt::visit::visit_expr(self, expr);
+        }
+    }
+
+    let mut find = Find(false);
+    find.visit_expr(expr);
+    find.0
 }
 
 #[track_caller]

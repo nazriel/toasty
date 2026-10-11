@@ -147,6 +147,21 @@ impl Expand<'_> {
                     }
                 }
 
+                #vis fn group_by<__E, __U>(self, keys: __E) -> Self
+                where
+                    __E: #toasty::IntoExpr<__U>,
+                {
+                    Self {
+                        stmt: self.stmt.group_by(keys),
+                    }
+                }
+
+                #vis fn having(self, predicate: #toasty::stmt::Expr<bool>) -> Self {
+                    Self {
+                        stmt: self.stmt.having(predicate),
+                    }
+                }
+
                 #vis fn order_by(self, order_by: impl Into<#toasty::stmt::OrderBy>) -> Self {
                     Self {
                         stmt: self.stmt.order_by(order_by),

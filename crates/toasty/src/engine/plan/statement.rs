@@ -472,15 +472,15 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
                     *expr = stmt::Expr::arg_project(0, [column]);
                     false
                 }
-                stmt::Expr::Func(stmt::ExprFunc::Count(stmt::FuncCount { arg: None, .. }))
-                    if is_returning_projection =>
-                {
+                stmt::Expr::Func(_) if is_returning_projection && expr.is_aggregate() => {
+                    let item = SelectItem::from_aggregate(expr).unwrap();
                     let index = self
                         .stmt_info
                         .load_data_select_items
                         .get()
                         .unwrap()
-                        .get_index_of_count_star();
+                        .get_index_of(&item)
+                        .unwrap();
                     reads_row = true;
                     *expr = stmt::Expr::arg_project(0, [index]);
                     false
@@ -514,19 +514,36 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
     }
 
     fn extract_columns_from_returning(&mut self, returning: &Returning) {
-        stmt::visit::for_each_expr(returning, |expr| match expr {
-            stmt::Expr::Reference(expr_reference) => {
-                assert!(
-                    expr_reference.is_column(),
-                    "TODO: expr_reference = {expr_reference:#?}"
-                );
-                self.load_data.select_items.insert((*expr_reference).into());
+        /// Collects the items a returning clause reads. An aggregate is one
+        /// item: the column inside it is aggregated by the database, not
+        /// selected.
+        struct CollectSelectItems<'a>(&'a mut SelectItems);
+
+        impl stmt::Visit for CollectSelectItems<'_> {
+            fn visit_expr(&mut self, expr: &stmt::Expr) {
+                if let Some(item) = SelectItem::from_aggregate(expr) {
+                    self.0.insert(item);
+                    return;
+                }
+
+                if let stmt::Expr::Reference(expr_reference) = expr {
+                    assert!(
+                        expr_reference.is_column(),
+                        "TODO: expr_reference = {expr_reference:#?}"
+                    );
+                    self.0.insert((*expr_reference).into());
+                }
+
+                stmt::visit::visit_expr(self, expr);
             }
-            stmt::Expr::Func(stmt::ExprFunc::Count(stmt::FuncCount { arg: None, .. })) => {
-                self.load_data.select_items.insert(SelectItem::CountStar);
-            }
-            _ => {}
-        })
+        }
+
+        if let Some(returning) = returning {
+            stmt::Visit::visit_returning(
+                &mut CollectSelectItems(&mut self.load_data.select_items),
+                returning,
+            );
+        }
     }
 
     /// Extract arguments needed to perform data loading
@@ -725,6 +742,8 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
             }),
             filter,
             distinct: false,
+            group_by: vec![],
+            having: None,
         };
 
         stmt.filter_mut_unwrap().set(stmt::Expr::exists(sub_query));
@@ -880,8 +899,12 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
         stmt: stmt::Statement,
         returning: &mut Returning,
     ) -> Result<mir::NodeId> {
-        // COUNT(*) is SQL-only
-        if self.load_data.select_items.contains(&SelectItem::CountStar)
+        // COUNT(*) and the other aggregates are SQL-only
+        if self
+            .load_data
+            .select_items
+            .iter()
+            .any(|item| matches!(item, SelectItem::CountStar | SelectItem::Aggregate(_)))
             && !self.planner.engine.capability().sql()
         {
             return Err(toasty_core::Error::unsupported_feature(format!(
@@ -1365,6 +1388,8 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
                 filter: stmt::Filter::new(true),
                 returning: stmt::Returning::Project(conditional_probe_projection(cte_column(0, 0))),
                 distinct: false,
+                group_by: vec![],
+                having: None,
             })
             .build(),
         };
@@ -1393,6 +1418,8 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
                 },
             )])),
             distinct: false,
+            group_by: vec![],
+            having: None,
         });
         // The write applies only when the two counts agree — AND that guard
         // onto the write's filter.
@@ -1439,6 +1466,8 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
                     cte_column(0, 1),
                 ])),
                 distinct: false,
+                group_by: vec![],
+                having: None,
             })
         } else {
             // Read the probe counts alongside the changed rows. `counts` yields
@@ -1473,6 +1502,8 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
                 filter: stmt::Filter::new(true),
                 returning: stmt::Returning::Project(stmt::Expr::record_from_vec(columns)),
                 distinct: false,
+                group_by: vec![],
+                having: None,
             })
         };
 
@@ -2382,6 +2413,8 @@ fn conditional_probe_query(
         filter: stmt::Filter::new(filter),
         returning: stmt::Returning::Project(stmt::Expr::record_from_vec(vec![condition])),
         distinct: false,
+        group_by: vec![],
+        having: None,
     })
     .locks(if lock {
         vec![stmt::Lock::Update]

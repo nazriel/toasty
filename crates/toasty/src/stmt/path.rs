@@ -364,6 +364,44 @@ impl<T, U> Path<T, U> {
             nulls: None,
         }
     }
+
+    /// Read this path's value as nullable: the same path, typed `Option<U>`.
+    ///
+    /// A field read through an optional `belongs_to` relation has no value
+    /// when the relation is unset, but its path keeps the field's own type.
+    /// Projecting it with `.nullable()` yields `None` for those rows instead
+    /// of a decode error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(Debug, toasty::Model)]
+    /// # struct User {
+    /// #     #[key]
+    /// #     id: i64,
+    /// #     name: String,
+    /// # }
+    /// # #[derive(Debug, toasty::Model)]
+    /// # struct Ticket {
+    /// #     #[key]
+    /// #     id: i64,
+    /// #     title: String,
+    /// #     assignee_id: Option<i64>,
+    /// #     #[belongs_to(key = assignee_id, references = id)]
+    /// #     assignee: toasty::Deferred<Option<User>>,
+    /// # }
+    /// // `None` for a ticket without an assignee.
+    /// let q = Ticket::all().select((
+    ///     Ticket::fields().title(),
+    ///     Ticket::fields().assignee().name().nullable(),
+    /// ));
+    /// ```
+    pub fn nullable(self) -> Path<T, Option<U>> {
+        Path {
+            untyped: self.untyped,
+            _p: PhantomData,
+        }
+    }
 }
 
 impl<T, U> Path<T, List<U>> {

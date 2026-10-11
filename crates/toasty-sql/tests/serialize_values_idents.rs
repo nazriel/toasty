@@ -105,6 +105,8 @@ fn select_id_from_users() -> stmt::Statement {
         source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     stmt::Statement::Query(stmt::Query::builder(select).build())
 }
@@ -245,6 +247,8 @@ fn select_from_cte() -> stmt::Statement {
             source,
             filter: Filter::ALL,
             distinct: false,
+            group_by: vec![],
+            having: None,
         };
         stmt::Query::builder(select).build()
     };
@@ -264,6 +268,8 @@ fn select_from_cte() -> stmt::Statement {
         source: outer_source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     stmt::Statement::Query(
         stmt::Query::builder(outer_select)

@@ -1,3 +1,6 @@
+mod aggregate;
+pub use aggregate::{avg, count, count_all, max, min, sum};
+
 mod association;
 pub use association::Association;
 

@@ -289,6 +289,8 @@ impl Exec<'_> {
             source: stmt::Source::table(table_id),
             filter: update.filter.clone(),
             distinct: false,
+            group_by: vec![],
+            having: None,
         };
         let select_stmt =
             stmt::Statement::Query(stmt::Query::new(stmt::ExprSet::Select(Box::new(select))));

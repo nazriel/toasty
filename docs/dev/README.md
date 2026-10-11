@@ -25,6 +25,7 @@ Guide-level design documents for specific features. Use
 [`_template.md`](./design/_template.md) when starting a new one.
 
 - [Design Overview](./design/README.md)
+- [Aggregates and Grouping](./design/aggregates.md)
 - [Atomic Batches for DynamoDB](./design/atomic-batches.md)
 - [Completing Column Projection](./design/column-projection.md)
 - [Document and Collection Fields](./design/document-fields.md)

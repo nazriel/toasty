@@ -1,4 +1,5 @@
 mod association;
+mod belongs_to_join;
 mod expr_or;
 mod include;
 mod insert;
@@ -666,27 +667,7 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
             return;
         }
 
-        // First, run the default visitor to lower sub-expressions
-        self.visit_expr_mut(&mut node.expr);
-
-        // An embedded newtype field lowers to a single-element record,
-        // one layer per newtype in the chain. Unwrap them so the ordering
-        // applies to the underlying column — otherwise the eq synthesis
-        // below would hit the record-vs-record arm of
-        // `lower_expr_binary_op`, which drains the operand records and
-        // would leave an empty record behind.
-        while let stmt::Expr::Record(rec) = &mut node.expr
-            && rec.len() == 1
-        {
-            node.expr = rec.fields.pop().unwrap();
-        }
-
-        // Reuse binary-op lowering: synthesize `expr == expr` so that
-        // cast conversions are applied, then keep the LHS result.
-        let mut lhs = node.expr.clone();
-        let mut rhs = node.expr.take();
-        self.lower_expr_binary_op(stmt::BinaryOp::Eq, &mut lhs, &mut rhs);
-        node.expr = lhs;
+        self.lower_comparable_expr(&mut node.expr);
     }
 
     fn visit_assignments_mut(&mut self, i: &mut stmt::Assignments) {
@@ -1059,6 +1040,11 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
                     }
                 }
             }
+            stmt::Expr::Func(stmt::ExprFunc::Count(stmt::FuncCount { arg: Some(_), .. }))
+            | stmt::Expr::Func(stmt::ExprFunc::Aggregate(_)) => {
+                stmt::visit_mut::visit_expr_mut(self, expr);
+                lower_aggregate_arg(expr);
+            }
             stmt::Expr::Stmt(_) => {
                 let stmt::Expr::Stmt(mut expr_stmt) = expr.take() else {
                     panic!()
@@ -1322,6 +1308,8 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
     }
 
     fn visit_stmt_query_mut(&mut self, stmt: &mut stmt::Query) {
+        let joins = self.join_belongs_to_paths(stmt);
+
         let mut lower = self.scope_expr(&stmt.body);
 
         if let Some(with) = &mut stmt.with {
@@ -1338,6 +1326,10 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
 
         self.visit_expr_set_mut(&mut stmt.body);
 
+        if let Some(joins) = joins {
+            joins.apply(stmt);
+        }
+
         self.rewrite_offset_after_as_filter(stmt);
     }
 
@@ -1345,6 +1337,12 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
         let mut lower = self.scope_expr(&stmt.source);
 
         lower.visit_filter_mut(&mut stmt.filter);
+        for key in &mut stmt.group_by {
+            lower.lower_comparable_expr(key);
+        }
+        if let Some(having) = &mut stmt.having {
+            lower.visit_expr_mut(having);
+        }
         lower.visit_returning_mut(&mut stmt.returning);
         lower.apply_lowering_filter_constraint(&mut stmt.filter);
 
@@ -1810,6 +1808,33 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
     }
 
     fn apply_lowering_filter_constraint(&self, _filter: &mut stmt::Filter) {}
+
+    /// Lowers an expression the database compares as stored: an ordering or
+    /// a grouping key. A value stored in another type than its field's (a
+    /// date kept as text) is compared in the stored type.
+    fn lower_comparable_expr(&mut self, expr: &mut stmt::Expr) {
+        // First, run the default visitor to lower sub-expressions
+        self.visit_expr_mut(expr);
+
+        // An embedded newtype field lowers to a single-element record,
+        // one layer per newtype in the chain. Unwrap them so the ordering
+        // applies to the underlying column — otherwise the eq synthesis
+        // below would hit the record-vs-record arm of
+        // `lower_expr_binary_op`, which drains the operand records and
+        // would leave an empty record behind.
+        while let stmt::Expr::Record(rec) = expr
+            && rec.len() == 1
+        {
+            *expr = rec.fields.pop().unwrap();
+        }
+
+        // Reuse binary-op lowering: synthesize `expr == expr` so that
+        // cast conversions are applied, then keep the LHS result.
+        let mut lhs = expr.clone();
+        let mut rhs = expr.take();
+        self.lower_expr_binary_op(stmt::BinaryOp::Eq, &mut lhs, &mut rhs);
+        *expr = lhs;
+    }
 
     /// Lowers a scalar subquery that the database evaluates as part of the
     /// current statement, its references to the enclosing rows kept as
@@ -2288,6 +2313,36 @@ impl LoweringContext<'_> {
 /// projection on the RHS).
 /// Whether an expression is an embedded-enum decode — a `Match` over the
 /// discriminant, possibly under a projection selecting a record slot.
+/// Make a lowered aggregate's argument the stored column.
+///
+/// A field stored in another type than its own (a date stored as text, say)
+/// lowers to a decode cast of its column. The database aggregates the stored
+/// values: `MIN`, `MAX` and `SUM` return a stored value, so the cast moves
+/// outside the aggregate and decodes the result; `COUNT` and `AVG` return
+/// their own type, so the cast is dropped.
+fn lower_aggregate_arg(expr: &mut stmt::Expr) {
+    let (arg, decodes_result) = match expr {
+        stmt::Expr::Func(stmt::ExprFunc::Count(func)) => match &mut func.arg {
+            Some(arg) => (&mut **arg, false),
+            None => return,
+        },
+        stmt::Expr::Func(stmt::ExprFunc::Aggregate(func)) => {
+            (&mut *func.arg, func.func != stmt::AggregateFunc::Avg)
+        }
+        _ => return,
+    };
+
+    let stmt::Expr::Cast(cast) = arg else {
+        return;
+    };
+    let ty = cast.ty.clone();
+    *arg = cast.expr.take();
+
+    if decodes_result {
+        *expr = stmt::Expr::cast(expr.take(), ty);
+    }
+}
+
 fn expr_is_enum_decode(expr: &stmt::Expr) -> bool {
     match expr {
         stmt::Expr::Match(_) => true,

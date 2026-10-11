@@ -51,3 +51,22 @@ pub async fn count_with_filter(t: &mut Test) -> Result<()> {
 
     Ok(())
 }
+
+#[driver_test(requires(sql), scenario(crate::scenarios::two_models))]
+pub async fn count_with_a_filter_known_to_match_nothing(t: &mut Test) -> Result<()> {
+    let mut db = setup(t).await;
+
+    toasty::create!(User::[{ name: "a" }, { name: "b" }])
+        .exec(&mut db)
+        .await?;
+
+    // An empty `IN` list matches no record before the query runs; the count
+    // is still answered, and it is zero.
+    let count = User::filter(User::fields().name().in_list(Vec::<String>::new()))
+        .count()
+        .exec(&mut db)
+        .await?;
+    assert_eq!(count, 0);
+
+    Ok(())
+}

@@ -6,11 +6,11 @@ use super::{
     ExprExists, ExprFunc, ExprInList, ExprInSubquery, ExprIncoming, ExprIntersects, ExprIsNull,
     ExprIsSuperset, ExprIsVariant, ExprLength, ExprLet, ExprLike, ExprList, ExprMap, ExprMatch,
     ExprNot, ExprOr, ExprProject, ExprRecord, ExprReference, ExprSet, ExprSetOp, ExprStartsWith,
-    ExprStmt, ExprVariant, Filter, FuncCount, FuncJsonExtract, FuncLastInsertId, Include, Insert,
-    InsertTarget, Join, JoinOp, Limit, LimitCursor, LimitOffset, Node, OrderBy, OrderByExpr, Path,
-    Projection, Query, Returning, Select, Source, SourceModel, SourceTable, SourceTableId,
-    Statement, TableDerived, TableFactor, TableRef, TableWithJoins, Type, Update, UpdateTarget,
-    Value, ValueRecord, Values, With,
+    ExprStmt, ExprVariant, Filter, FuncAggregate, FuncCount, FuncJsonExtract, FuncLastInsertId,
+    Include, Insert, InsertTarget, Join, JoinOp, Limit, LimitCursor, LimitOffset, Node, OrderBy,
+    OrderByExpr, Path, Projection, Query, Returning, Select, Source, SourceModel, SourceTable,
+    SourceTableId, Statement, TableDerived, TableFactor, TableRef, TableWithJoins, Type, Update,
+    UpdateTarget, Value, ValueRecord, Values, With,
 };
 
 /// Mutable visitor trait for the statement AST.
@@ -169,6 +169,13 @@ pub trait VisitMut {
     /// The default implementation delegates to [`visit_expr_func_mut`].
     fn visit_expr_func_mut(&mut self, i: &mut ExprFunc) {
         visit_expr_func_mut(self, i);
+    }
+
+    /// Visits a [`FuncAggregate`] node mutably.
+    ///
+    /// The default implementation delegates to [`visit_expr_func_aggregate_mut`].
+    fn visit_expr_func_aggregate_mut(&mut self, i: &mut FuncAggregate) {
+        visit_expr_func_aggregate_mut(self, i);
     }
 
     /// Visits a [`FuncCount`] node mutably.
@@ -654,6 +661,10 @@ impl<V: VisitMut> VisitMut for &mut V {
         VisitMut::visit_expr_func_mut(&mut **self, i);
     }
 
+    fn visit_expr_func_aggregate_mut(&mut self, i: &mut FuncAggregate) {
+        VisitMut::visit_expr_func_aggregate_mut(&mut **self, i);
+    }
+
     fn visit_expr_func_count_mut(&mut self, i: &mut FuncCount) {
         VisitMut::visit_expr_func_count_mut(&mut **self, i);
     }
@@ -1080,6 +1091,7 @@ where
 {
     match node {
         ExprFunc::Count(func) => v.visit_expr_func_count_mut(func),
+        ExprFunc::Aggregate(func) => v.visit_expr_func_aggregate_mut(func),
         ExprFunc::JsonExtract(func) => v.visit_expr_func_json_extract_mut(func),
         ExprFunc::LastInsertId(func) => v.visit_expr_func_last_insert_id_mut(func),
     }
@@ -1098,6 +1110,14 @@ where
     V: VisitMut + ?Sized,
 {
     v.visit_expr_mut(&mut node.base);
+}
+
+/// Default mutable traversal for [`FuncAggregate`] nodes. Visits the argument expression.
+pub fn visit_expr_func_aggregate_mut<V>(v: &mut V, node: &mut FuncAggregate)
+where
+    V: VisitMut + ?Sized,
+{
+    v.visit_expr_mut(&mut node.arg);
 }
 
 /// Default mutable traversal for [`FuncCount`] nodes. Visits the optional argument and optional filter expressions.
@@ -1597,13 +1617,19 @@ where
     }
 }
 
-/// Default mutable traversal for [`Select`] nodes. Visits the source, filter, and returning clause.
+/// Default mutable traversal for [`Select`] nodes. Visits the source, filter, grouping, `HAVING` filter and returning clause.
 pub fn visit_stmt_select_mut<V>(v: &mut V, node: &mut Select)
 where
     V: VisitMut + ?Sized,
 {
     v.visit_source_mut(&mut node.source);
     v.visit_filter_mut(&mut node.filter);
+    for expr in &mut node.group_by {
+        v.visit_expr_mut(expr);
+    }
+    if let Some(expr) = &mut node.having {
+        v.visit_expr_mut(expr);
+    }
     v.visit_returning_mut(&mut node.returning);
 }
 

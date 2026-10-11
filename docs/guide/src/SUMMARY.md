@@ -37,6 +37,7 @@
 
 - [Filtering with Expressions](./filtering-with-expressions.md)
 - [Sorting, Limits, and Pagination](./sorting-limits-and-pagination.md)
+- [Aggregates and Grouping](./aggregates-and-grouping.md)
 
 # Advanced Features
 

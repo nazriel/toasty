@@ -112,6 +112,8 @@ fn select_id_from_users() -> stmt::Query {
         source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     stmt::Query::builder(select).build()
 }
@@ -214,6 +216,8 @@ fn select_with_single_cte() {
         source: outer_source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     let stmt = stmt::Statement::Query(
         stmt::Query::builder(outer_select)
@@ -245,6 +249,8 @@ fn select_with_multiple_ctes() {
         source: outer_source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     let stmt = stmt::Statement::Query(
         stmt::Query::builder(outer_select)
@@ -288,6 +294,8 @@ fn select_from_derived_subquery() {
         source: outer_source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     let stmt = stmt::Statement::Query(stmt::Query::builder(outer_select).build());
 
@@ -312,6 +320,8 @@ fn select_users_with_filter(filter: Expr) -> stmt::Statement {
         source,
         filter: Filter::new(filter),
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     stmt::Statement::Query(stmt::Query::builder(select).build())
 }
@@ -398,6 +408,8 @@ fn users_by_setting() -> stmt::Statement {
             Expr::eq(col(0, 2), Expr::arg(0)),
         )),
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     let mut query = select_id_from_users();
     query.order_by = Some(OrderBy {

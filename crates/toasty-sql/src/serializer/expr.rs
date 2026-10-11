@@ -1,4 +1,7 @@
-use toasty_core::{schema::db::ColumnId, stmt::ResolvedRef};
+use toasty_core::{
+    schema::db::{self, ColumnId},
+    stmt::ResolvedRef,
+};
 
 use super::{ColumnAlias, Comma, Delimited, Ident, ToSql};
 
@@ -31,8 +34,12 @@ impl ToSql for &stmt::Expr {
                     fmt!(f, "COUNT(CASE WHEN " expr " THEN 1 END)")
                 }
                 (None, Some(expr)) => fmt!(f, "COUNT(*) FILTER (WHERE " expr ")"),
+                (Some(arg), None) => fmt!(f, "COUNT(" arg ")"),
                 _ => todo!("func={func:#?}"),
             },
+            stmt::Expr::Func(stmt::ExprFunc::Aggregate(func)) => {
+                serialize_aggregate(f, func);
+            }
             stmt::Expr::Func(stmt::ExprFunc::LastInsertId(_)) => {
                 fmt!(f, "LAST_INSERT_ID()")
             }
@@ -257,6 +264,50 @@ impl ToSql for &stmt::Expr {
             },
             _ => todo!("expr={:#?}", self),
         }
+    }
+}
+
+/// `SUM`, `AVG`, `MIN` or `MAX` over one expression.
+///
+/// SQLite returns each in the type Toasty decodes. PostgreSQL widens the sum
+/// of integers (to `BIGINT` or `NUMERIC`) and averages integers as `NUMERIC`;
+/// MySQL and MariaDB sum and average integers as `DECIMAL`. There the sum of
+/// an integer column is cast back to an integer and the average to a double,
+/// so every database returns the type the query decodes.
+fn serialize_aggregate(f: &mut super::Formatter<'_>, func: &stmt::FuncAggregate) {
+    let name = func.func.sql_name();
+    let arg = func.arg.as_ref();
+
+    if f.serializer.is_sqlite() {
+        fmt!(f, name "(" arg ")");
+        return;
+    }
+
+    let storage_ty = match arg {
+        stmt::Expr::Reference(expr_reference @ stmt::ExprReference::Column(_)) => {
+            match f.cx.resolve_expr_reference(expr_reference) {
+                ResolvedRef::Column(column) => Some(column.storage_ty.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    match func.func {
+        stmt::AggregateFunc::Avg => match f.serializer.dialect {
+            Dialect::Postgresql => fmt!(f, "CAST(AVG(" arg ") AS DOUBLE PRECISION)"),
+            _ => fmt!(f, "CAST(AVG(" arg ") AS DOUBLE)"),
+        },
+        stmt::AggregateFunc::Sum => match (&storage_ty, f.serializer.dialect) {
+            (
+                Some(ty @ (db::Type::Integer(_) | db::Type::UnsignedInteger(_))),
+                Dialect::Postgresql,
+            ) => fmt!(f, "CAST(SUM(" arg ") AS " ty ")"),
+            (Some(db::Type::Integer(_)), _) => fmt!(f, "CAST(SUM(" arg ") AS SIGNED)"),
+            (Some(db::Type::UnsignedInteger(_)), _) => fmt!(f, "CAST(SUM(" arg ") AS UNSIGNED)"),
+            _ => fmt!(f, "SUM(" arg ")"),
+        },
+        stmt::AggregateFunc::Min | stmt::AggregateFunc::Max => fmt!(f, name "(" arg ")"),
     }
 }
 

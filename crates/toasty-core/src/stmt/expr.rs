@@ -292,6 +292,10 @@ impl Expr {
             | Self::StartsWith(_) => ty.is_bool(),
             Self::BinaryOp(e) if !e.op.is_arithmetic() => ty.is_bool(),
             Self::Func(ExprFunc::Count(_)) => ty.is_u64(),
+            Self::Func(ExprFunc::Aggregate(func)) => match func.func {
+                super::AggregateFunc::Avg => matches!(ty, Type::F64),
+                _ => func.arg.is_a(resolve, ty),
+            },
             Self::Func(ExprFunc::LastInsertId(_)) => ty.is_i64(),
             // A match can produce the value of any of its arms.
             Self::Match(expr_match) => {

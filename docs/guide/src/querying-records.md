@@ -281,6 +281,64 @@ let per_user: Vec<Vec<Article>> = User::all()
 Projecting a `via` relation is supported on SQL backends; it is not yet
 available on DynamoDB.
 
+## Reading a related record's field
+
+A field path through a `belongs_to` relation reads a field of the record the
+relation points at. Put it in `.select()` next to the model's own fields:
+
+```rust
+# use toasty::Model;
+# #[derive(Debug, toasty::Model)]
+# struct User {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     name: String,
+# }
+# #[derive(Debug, toasty::Model)]
+# struct Post {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     title: String,
+#     #[index]
+#     author_id: u64,
+#     #[belongs_to(key = author_id, references = id)]
+#     author: toasty::Deferred<User>,
+#     #[index]
+#     editor_id: Option<u64>,
+#     #[belongs_to(key = editor_id, references = id)]
+#     editor: toasty::Deferred<Option<User>>,
+# }
+# async fn __example(mut db: toasty::Db) -> toasty::Result<()> {
+// Each post's title and its author's name.
+let bylines: Vec<(String, String)> = Post::all()
+    .select((Post::fields().title(), Post::fields().author().name()))
+    .exec(&mut db)
+    .await?;
+
+// An optional relation: `None` for a post without an editor.
+let edited: Vec<(String, Option<String>)> = Post::all()
+    .select((
+        Post::fields().title(),
+        Post::fields().editor().name().nullable(),
+    ))
+    .exec(&mut db)
+    .await?;
+# Ok(())
+# }
+```
+
+On SQL databases the query joins the related table and reads everything in
+one statement: an inner join for a required relation, a left join once any
+relation on the path is optional. A path can follow several `belongs_to`
+relations (`Comment::fields().post().author().name()`), and the same path
+also works in `.order_by()` and as a [grouping key](./aggregates-and-grouping.md).
+
+A field read through an optional relation keeps the field's own type in its
+path. Call `.nullable()` on the path to read it as an `Option`; without it,
+a row whose relation is unset fails to decode.
+
 ## Sorting by most recent
 
 `.latest_by(field)` sorts the query in descending order of the named
@@ -329,6 +387,10 @@ Query builders support these terminal methods:
 | `.exec(&mut db)` | `Result<Vec<User>>` |
 | `.first().exec(&mut db)` | `Result<Option<User>>` |
 | `.get(&mut db)` | `Result<User>` |
+| `.count().exec(&mut db)` | `Result<u64>` |
+
+To summarize records with sums, averages, minimums, maximums, or counts per
+group, see [Aggregates and Grouping](./aggregates-and-grouping.md).
 
 > **Runnable example:** [`product-search`] builds filter expressions, sorts, cursor-paginates, and projects columns.
 

@@ -179,6 +179,9 @@ pub use hash_index::HashIndex;
 mod sorted_index;
 pub use sorted_index::SortedIndex;
 
+mod func_aggregate;
+pub use func_aggregate::{AggregateFunc, FuncAggregate};
+
 mod func_count;
 pub use func_count::FuncCount;
 

@@ -1,4 +1,6 @@
-use super::{Include, Node, Query, Returning, Source, SourceModel, Statement, Visit, VisitMut};
+use super::{
+    Expr, Include, Node, Query, Returning, Source, SourceModel, Statement, Visit, VisitMut,
+};
 use crate::{
     schema::db::TableId,
     stmt::{ExprSet, Filter},
@@ -38,6 +40,16 @@ pub struct Select {
     /// through the path can yield duplicate target rows that must collapse
     /// to distinct targets.
     pub distinct: bool,
+
+    /// The grouping (`GROUP BY` clause). Empty when the query is not
+    /// grouped. Each expression is one grouping key; rows with equal keys
+    /// form one group, and the projection may read a key or an aggregate
+    /// over the group.
+    pub group_by: Vec<Expr>,
+
+    /// The filter applied to each group (`HAVING` clause). It may read the
+    /// grouping keys and aggregates over the group.
+    pub having: Option<Expr>,
 }
 
 impl Select {
@@ -49,7 +61,15 @@ impl Select {
             source: source.into(),
             filter: filter.into(),
             distinct: false,
+            group_by: vec![],
+            having: None,
         }
+    }
+
+    /// Returns `true` if the select groups its rows (`GROUP BY`) or filters
+    /// groups (`HAVING`).
+    pub fn is_grouped(&self) -> bool {
+        !self.group_by.is_empty() || self.having.is_some()
     }
 
     /// Adds an association include to the returning clause.

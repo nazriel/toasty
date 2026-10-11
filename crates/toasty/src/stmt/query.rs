@@ -443,6 +443,97 @@ impl<T> Query<List<T>> {
     }
 }
 
+impl<T> Query<List<T>> {
+    /// Group the matching records by one or more keys (`GROUP BY`).
+    ///
+    /// `keys` is a field path, or a tuple of field paths to group by several
+    /// keys. A path through a `belongs_to` relation groups by a value of the
+    /// related record, read with a join in the same statement. Each group
+    /// yields one row, so a grouped query must project with
+    /// [`select`](Query::select): a grouping key, or an aggregate from
+    /// [`toasty::stmt`](crate::stmt) such as [`count_all`](crate::stmt::count_all)
+    /// or [`sum`](crate::stmt::sum). Selecting a field that is neither a
+    /// grouping key nor inside an aggregate is an `invalid_statement` error,
+    /// returned before the query runs.
+    ///
+    /// Calling `group_by` again adds keys. Grouping is supported on SQL
+    /// databases.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(Debug, toasty::Model)]
+    /// # struct Order {
+    /// #     #[key]
+    /// #     id: i64,
+    /// #     status: String,
+    /// #     region: String,
+    /// #     total: i64,
+    /// # }
+    /// use toasty::stmt::{count_all, sum};
+    ///
+    /// // Orders and revenue per status and region.
+    /// let q = Order::all()
+    ///     .group_by((Order::fields().status(), Order::fields().region()))
+    ///     .select((
+    ///         Order::fields().status(),
+    ///         Order::fields().region(),
+    ///         count_all(),
+    ///         sum(Order::fields().total()),
+    ///     ));
+    /// ```
+    pub fn group_by<E, U>(mut self, keys: E) -> Self
+    where
+        E: IntoExpr<U>,
+    {
+        let keys = match keys.into_expr().untyped {
+            stmt::Expr::Record(record) => record.fields,
+            key => vec![key],
+        };
+        self.untyped
+            .body
+            .as_select_mut_unwrap()
+            .group_by
+            .extend(keys);
+        self
+    }
+
+    /// Keep only the groups for which `predicate` holds (`HAVING`).
+    ///
+    /// The predicate is evaluated once per group, after grouping, so it can
+    /// compare aggregates such as [`count_all`](crate::stmt::count_all) or
+    /// [`sum`](crate::stmt::sum), and grouping keys. Use
+    /// [`filter`](Query::filter) for conditions on individual records.
+    /// Calling `having` again combines the predicates with AND.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(Debug, toasty::Model)]
+    /// # struct Order {
+    /// #     #[key]
+    /// #     id: i64,
+    /// #     customer: String,
+    /// #     total: i64,
+    /// # }
+    /// use toasty::stmt::sum;
+    ///
+    /// // Customers who spent more than 1000.
+    /// let q = Order::all()
+    ///     .group_by(Order::fields().customer())
+    ///     .having(sum(Order::fields().total()).gt(1000))
+    ///     .select((Order::fields().customer(), sum(Order::fields().total())));
+    /// ```
+    pub fn having(mut self, predicate: Expr<bool>) -> Self {
+        let select = self.untyped.body.as_select_mut_unwrap();
+        select.having = Some(match select.having.take() {
+            Some(existing) => stmt::Expr::and(existing, predicate.untyped),
+            None => predicate.untyped,
+        });
+        self
+    }
+}
+
 impl<T: Model> Query<List<T>> {
     /// Convert this query into a [`RelationInsert`] statement that inserts `item` into the
     /// relation that produced this list query.

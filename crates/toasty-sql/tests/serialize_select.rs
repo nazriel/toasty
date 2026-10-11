@@ -122,6 +122,8 @@ fn make_query(
         source: users_source(),
         filter,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     let mut query = stmt::Query::builder(select).build();
     query.order_by = order_by;
@@ -164,6 +166,8 @@ fn select_distinct() {
             source: users_source(),
             filter: Filter::ALL,
             distinct: true,
+            group_by: vec![],
+            having: None,
         };
         stmt::Statement::Query(stmt::Query::builder(select).build())
     };

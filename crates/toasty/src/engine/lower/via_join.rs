@@ -297,7 +297,11 @@ fn single_column_fk(schema: &toasty_core::Schema, field_id: app::FieldId) -> Sin
 /// A raw (storage-level) column reference at table `slot` for a FK field.
 /// Used in JOIN constraints, which compare stored values directly and so need
 /// no storage→model cast.
-fn raw_column(schema: &toasty_core::Schema, slot: usize, field_id: app::FieldId) -> stmt::Expr {
+pub(super) fn raw_column(
+    schema: &toasty_core::Schema,
+    slot: usize,
+    field_id: app::FieldId,
+) -> stmt::Expr {
     stmt::Expr::column(stmt::ExprReference::column(
         slot,
         single_column_fk(schema, field_id).primitive.column.index,

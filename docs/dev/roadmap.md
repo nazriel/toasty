@@ -55,7 +55,7 @@ the entry lands here.
 - Arithmetic in predicates (add, subtract, multiply, divide, modulo)
 - Conditional expressions — `CASE WHEN ... THEN ... ELSE ... END`
 - `DISTINCT` / `DISTINCT ON` ([#425])
-- Aggregates — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY`, `HAVING` ([#421])
+- Aggregates — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY`, `HAVING` ([design](design/aggregates.md), [#421])
 - Subquery comparisons (`ALL` / `ANY` / `SOME`)
 - Recursive queries / CTEs ([#420])
 - Lateral joins ([#419])

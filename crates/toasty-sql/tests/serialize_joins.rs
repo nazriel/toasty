@@ -99,6 +99,8 @@ fn select_with_join(constraint: JoinOp) -> stmt::Statement {
         source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     stmt::Statement::Query(stmt::Query::builder(select).build())
 }
@@ -167,6 +169,8 @@ fn multi_step_left_join_chain() {
         source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     let stmt = stmt::Statement::Query(stmt::Query::builder(select).build());
     expect![[r#"SELECT tbl_0_0."id" AS column1, tbl_0_1."id" AS column2, tbl_0_2."id" AS column3 FROM "users" AS tbl_0_0 LEFT JOIN "posts" AS tbl_0_1 ON tbl_0_1."user_id" = tbl_0_0."id" LEFT JOIN "comments" AS tbl_0_2 ON tbl_0_2."post_id" = tbl_0_1."id";"#]].assert_eq(&render_sqlite(&schema, stmt));
@@ -210,6 +214,8 @@ fn mixed_inner_then_left_join() {
         source,
         filter: Filter::ALL,
         distinct: false,
+        group_by: vec![],
+        having: None,
     };
     let stmt = stmt::Statement::Query(stmt::Query::builder(select).build());
     expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 INNER JOIN "posts" AS tbl_0_1 ON tbl_0_1."user_id" = tbl_0_0."id" LEFT JOIN "comments" AS tbl_0_2 ON tbl_0_2."post_id" = tbl_0_1."id";"#]].assert_eq(&render_sqlite(&schema, stmt));

@@ -609,6 +609,14 @@ impl ToSql for &stmt::Select {
         } else {
             fmt!(f, select self.returning " FROM " self.source self.filter);
         }
+
+        if !self.group_by.is_empty() {
+            fmt!(f, " GROUP BY " Comma(&self.group_by));
+        }
+
+        if let Some(having) = &self.having {
+            fmt!(f, " HAVING " having);
+        }
     }
 }
 
