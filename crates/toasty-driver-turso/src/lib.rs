@@ -1143,6 +1143,8 @@ impl Driver for Turso {
             let mut drops = vec![];
             while let Some(row) = rows.next().await? {
                 if let TursoValue::Text(name) = row.get_value(0)? {
+                    // A quote character inside the name is escaped by doubling it.
+                    let name = name.replace('"', "\"\"");
                     drops.push(format!("DROP TABLE IF EXISTS \"{name}\""));
                 }
             }
