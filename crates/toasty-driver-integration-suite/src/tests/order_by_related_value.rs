@@ -346,3 +346,86 @@ pub async fn a_related_value_is_rejected_without_sql(test: &mut Test) -> Result<
 
     Ok(())
 }
+
+/// Ordering a model by a field of a `belongs_to` parent, ascending and
+/// descending. A record without a parent orders as null.
+#[driver_test(requires(sql))]
+pub async fn order_by_a_belongs_to_field(test: &mut Test) -> Result<()> {
+    #[derive(Debug, toasty::Model)]
+    struct Company {
+        #[key]
+        #[auto]
+        id: uuid::Uuid,
+
+        name: String,
+    }
+
+    #[derive(Debug, toasty::Model)]
+    struct Member {
+        #[key]
+        #[auto]
+        id: uuid::Uuid,
+
+        name: String,
+
+        #[index]
+        company_id: Option<uuid::Uuid>,
+
+        #[belongs_to(key = company_id, references = id)]
+        company: toasty::Deferred<Option<Company>>,
+    }
+
+    let mut db = test.setup_db(models!(Company, Member)).await;
+
+    let acme = Company::create().name("acme").exec(&mut db).await?;
+    let zeta = Company::create().name("zeta").exec(&mut db).await?;
+    for (name, company) in [
+        ("ann", Some(&zeta)),
+        ("bob", None),
+        ("cid", Some(&acme)),
+        ("dee", Some(&zeta)),
+        ("eve", None),
+    ] {
+        let mut member = Member::create().name(name);
+        if let Some(company) = company {
+            member = member.company(company);
+        }
+        member.exec(&mut db).await?;
+    }
+
+    async fn members(db: &mut Db, order: impl Into<OrderBy>) -> Result<Vec<String>> {
+        let members: Vec<Member> = Member::all()
+            .order_by(order)
+            .order_by(Member::fields().name().asc())
+            .exec(db)
+            .await?;
+        Ok(members.into_iter().map(|member| member.name).collect())
+    }
+
+    assert_eq!(
+        members(
+            &mut db,
+            Member::fields().company().name().asc().nulls_last()
+        )
+        .await?,
+        ["cid", "ann", "dee", "bob", "eve"]
+    );
+    assert_eq!(
+        members(
+            &mut db,
+            Member::fields().company().name().desc().nulls_last()
+        )
+        .await?,
+        ["ann", "dee", "cid", "bob", "eve"]
+    );
+    assert_eq!(
+        members(
+            &mut db,
+            Member::fields().company().name().asc().nulls_first()
+        )
+        .await?,
+        ["bob", "eve", "cid", "ann", "dee"]
+    );
+
+    Ok(())
+}

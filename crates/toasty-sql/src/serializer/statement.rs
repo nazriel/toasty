@@ -514,7 +514,20 @@ impl ToSql for &stmt::Query {
         };
 
         let body = &self.body;
-        let order_by = self.order_by.as_ref().map(|order_by| (" ", order_by));
+        let postgres = matches!(f.serializer.dialect, Dialect::Postgresql);
+        let order_by = self.order_by.as_ref().and_then(|order_by| {
+            // PostgreSQL reads a bare constant in `ORDER BY` as a column
+            // position and refuses a non-integer one (`ORDER BY NULL`). A
+            // constant orders nothing, so the item is left out, and with it
+            // the whole clause when nothing else remains.
+            let items: Vec<_> = order_by
+                .exprs
+                .iter()
+                .filter(|item| !(postgres && item.expr.is_value()))
+                .collect();
+
+            (!postgres || !items.is_empty()).then_some((" ", OrderByItems(items)))
+        });
         let limit = self.limit.as_ref().map(|limit| (" ", limit));
 
         fmt!(&mut f, self.with body order_by limit locks);
@@ -533,9 +546,13 @@ impl ToSql for &stmt::ExprSet {
     }
 }
 
-impl ToSql for &stmt::OrderBy {
+/// The items of an `ORDER BY` clause, after the dialect left out the ones it
+/// cannot take.
+struct OrderByItems<'a>(Vec<&'a stmt::OrderByExpr>);
+
+impl ToSql for OrderByItems<'_> {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
-        let order_by = Comma(&self.exprs);
+        let order_by = Comma(self.0);
 
         fmt!(f, "ORDER BY " order_by);
     }

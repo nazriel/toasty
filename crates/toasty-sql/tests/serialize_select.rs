@@ -275,6 +275,53 @@ fn select_with_order_by_multiple_columns() {
     expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY tbl_0_0."name" ASC, tbl_0_0."id" DESC;"#]].assert_eq(&render(Flavor::Sqlite, &schema, stmt));
 }
 
+/// `ORDER BY NULL DESC NULLS LAST[, id ASC]` for `flavor`. PostgreSQL reads a
+/// bare constant in `ORDER BY` as a column position, so it leaves the item out.
+fn render_constant_order_by(flavor: Flavor, with_column: bool) -> String {
+    let schema = users_schema();
+    let mut exprs = vec![OrderByExpr {
+        expr: Expr::null(),
+        order: Some(Direction::Desc),
+        nulls: Some(stmt::Nulls::Last),
+    }];
+    if with_column {
+        exprs.push(OrderByExpr {
+            expr: col(0, 0),
+            order: Some(Direction::Asc),
+            nulls: None,
+        });
+    }
+    render(
+        flavor,
+        &schema,
+        make_query(Filter::ALL, Some(OrderBy { exprs }), None, vec![]),
+    )
+}
+
+#[test]
+fn select_with_constant_order_by_item() {
+    expect![[
+        r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY tbl_0_0."id" ASC;"#
+    ]]
+    .assert_eq(&render_constant_order_by(Flavor::Postgresql, true));
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY NULL DESC NULLS LAST, tbl_0_0."id" ASC;"#]]
+        .assert_eq(&render_constant_order_by(Flavor::Sqlite, true));
+    expect![[r#"SELECT tbl_0_0.`id` AS column_0 FROM `users` AS tbl_0_0 ORDER BY NULL IS NULL, NULL DESC, tbl_0_0.`id` ASC;"#]]
+        .assert_eq(&render_constant_order_by(Flavor::Mysql, true));
+}
+
+#[test]
+fn select_with_only_constant_order_by_items() {
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0;"#]]
+        .assert_eq(&render_constant_order_by(Flavor::Postgresql, false));
+    expect![[
+        r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 ORDER BY NULL DESC NULLS LAST;"#
+    ]]
+    .assert_eq(&render_constant_order_by(Flavor::Sqlite, false));
+    expect![[r#"SELECT tbl_0_0.`id` AS column_0 FROM `users` AS tbl_0_0 ORDER BY NULL IS NULL, NULL DESC;"#]]
+        .assert_eq(&render_constant_order_by(Flavor::Mysql, false));
+}
+
 /// `ORDER BY name <direction> NULLS <placement>` for `flavor`.
 fn render_nulls(flavor: Flavor, direction: Direction, nulls: stmt::Nulls) -> String {
     let schema = users_schema();
