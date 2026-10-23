@@ -160,7 +160,7 @@ impl Expand<'_> {
                     #( #field_register_calls )*
                 }
 
-                fn new_path<__Origin>(path: #toasty::Path<__Origin, Self>) -> Self::Path<__Origin> {
+                fn new_path<__Origin>(path: #toasty::Path<__Origin, Self>) -> <Self as #toasty::Model>::Path<__Origin> {
                     #field_struct_ident { path }
                 }
 
@@ -171,26 +171,26 @@ impl Expand<'_> {
                 }
 
                 fn find_by_primary_key(
-                    id: #toasty::stmt::Expr<Self::PrimaryKey>,
-                ) -> Self::Query<#toasty::List<Self>> {
+                    id: #toasty::stmt::Expr<<Self as #toasty::Model>::PrimaryKey>,
+                ) -> <Self as #toasty::Model>::Query<#toasty::List<Self>> {
                     #find_by_primary_key_body
                 }
 
                 fn wrap_query<__T>(
                     stmt: #toasty::stmt::Query<__T>,
-                ) -> Self::Query<__T> {
+                ) -> <Self as #toasty::Model>::Query<__T> {
                     #query_struct_ident::from_stmt(stmt)
                 }
 
                 fn query_one(
-                    query: Self::Query<#toasty::List<Self>>,
-                ) -> Self::Query<Self> {
+                    query: <Self as #toasty::Model>::Query<#toasty::List<Self>>,
+                ) -> <Self as #toasty::Model>::Query<Self> {
                     query.one()
                 }
 
                 fn query_first(
-                    query: Self::Query<#toasty::List<Self>>,
-                ) -> Self::Query<#toasty::Option<Self>> {
+                    query: <Self as #toasty::Model>::Query<#toasty::List<Self>>,
+                ) -> <Self as #toasty::Model>::Query<#toasty::Option<Self>> {
                     query.first()
                 }
 
@@ -214,7 +214,7 @@ impl Expand<'_> {
 
                 fn new_one_field<__Origin, __Target>(
                     path: #toasty::Path<__Origin, __Target>,
-                ) -> Self::OneField<__Origin, __Target> {
+                ) -> <Self as #toasty::Model>::OneField<__Origin, __Target> {
                     #field_struct_ident { path }
                 }
             }
@@ -228,7 +228,7 @@ impl Expand<'_> {
 
                 fn new_path<__Origin>(
                     path: #toasty::Path<__Origin, #toasty::List<#model_ident>>,
-                ) -> Self::Path<__Origin> {
+                ) -> <Self as #toasty::ViaTarget>::Path<__Origin> {
                     // A model terminal keeps navigating, so hand back its
                     // chainable `ManyField`.
                     <#model_ident as #toasty::Model>::new_many_field(path)
@@ -243,7 +243,7 @@ impl Expand<'_> {
 
                 fn make_via_query(
                     assoc: #toasty::stmt::Association<#toasty::List<#model_ident>>,
-                ) -> Self::Query {
+                ) -> <Self as #toasty::ViaTarget>::Query {
                     <#query_struct_ident<#toasty::List<#model_ident>>>::from_assoc_many(assoc)
                 }
             }
@@ -425,7 +425,7 @@ impl Expand<'_> {
         } else {
             let field_idents = pk_fields.iter().map(|f| &f.name.ident);
             quote! {
-                let pk_expr: #toasty::stmt::Expr<Self::PrimaryKey> =
+                let pk_expr: #toasty::stmt::Expr<<Self as #toasty::Model>::PrimaryKey> =
                     #toasty::IntoExpr::into_expr((
                         #( #model_ident::fields().#field_idents() ),*
                     ));

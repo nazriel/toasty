@@ -156,18 +156,18 @@ pub(super) fn embedded_model(model: &Model) -> TokenStream {
             type Update<'a> = #update_struct_ident<'a>;
             type Inner = Self;
 
-            fn new_path<__Origin>(path: #toasty::Path<__Origin, Self>) -> Self::Path<__Origin> {
+            fn new_path<__Origin>(path: #toasty::Path<__Origin, Self>) -> <Self as #toasty::Field>::Path<__Origin> {
                 #field_struct_ident { path }
             }
 
-            fn new_list_path<__Origin>(path: #toasty::Path<__Origin, #toasty::List<Self::ExprTarget>>) -> Self::ListPath<__Origin> {
+            fn new_list_path<__Origin>(path: #toasty::Path<__Origin, #toasty::List<<Self as #toasty::Field>::ExprTarget>>) -> <Self as #toasty::Field>::ListPath<__Origin> {
                 #field_list_struct_ident { path }
             }
 
             fn new_update<'a>(
                 assignments: &'a mut #toasty::core::stmt::Assignments,
                 projection: #toasty::core::stmt::Projection,
-            ) -> Self::Update<'a> {
+            ) -> <Self as #toasty::Field>::Update<'a> {
                 #update_struct_ident { assignments, projection }
             }
 
@@ -185,7 +185,7 @@ pub(super) fn embedded_model(model: &Model) -> TokenStream {
 
             fn key_constraint<__Origin>(
                 &self,
-                target: #toasty::Path<__Origin, Self::Inner>,
+                target: #toasty::Path<__Origin, <Self as #toasty::Field>::Inner>,
             ) -> #toasty::stmt::Expr<bool> {
                 target.eq(self)
             }
@@ -324,18 +324,18 @@ pub(super) fn embedded_enum(model: &Model) -> TokenStream {
             type Update<'a> = ();
             type Inner = Self;
 
-            fn new_path<__Origin>(path: #toasty::Path<__Origin, Self>) -> Self::Path<__Origin> {
+            fn new_path<__Origin>(path: #toasty::Path<__Origin, Self>) -> <Self as #toasty::Field>::Path<__Origin> {
                 #field_struct_ident { path }
             }
 
-            fn new_list_path<__Origin>(path: #toasty::Path<__Origin, #toasty::List<Self::ExprTarget>>) -> Self::ListPath<__Origin> {
+            fn new_list_path<__Origin>(path: #toasty::Path<__Origin, #toasty::List<<Self as #toasty::Field>::ExprTarget>>) -> <Self as #toasty::Field>::ListPath<__Origin> {
                 #field_list_struct_ident { path }
             }
 
             fn new_update<'a>(
                 _assignments: &'a mut #toasty::core::stmt::Assignments,
                 _projection: #toasty::core::stmt::Projection,
-            ) -> Self::Update<'a> {
+            ) -> <Self as #toasty::Field>::Update<'a> {
             }
 
             fn field_ty(
@@ -352,7 +352,7 @@ pub(super) fn embedded_enum(model: &Model) -> TokenStream {
 
             fn key_constraint<__Origin>(
                 &self,
-                target: #toasty::Path<__Origin, Self::Inner>,
+                target: #toasty::Path<__Origin, <Self as #toasty::Field>::Inner>,
             ) -> #toasty::stmt::Expr<bool> {
                 target.eq(self)
             }
