@@ -302,6 +302,7 @@ impl Driver for PostgreSQL {
         drop(conn);
 
         // Step 2: Connect to the temp DB, drop and recreate the target
+        let quoted_dbname = format!("\"{}\"", dbname.replace('"', "\"\""));
         let conn = connect(temp_dbname).await?;
         conn.client
             .execute(
@@ -313,11 +314,11 @@ impl Driver for PostgreSQL {
             .await
             .map_err(classify_pg_error)?;
         conn.client
-            .execute(&format!("DROP DATABASE IF EXISTS \"{}\"", dbname), &[])
+            .execute(&format!("DROP DATABASE IF EXISTS {}", quoted_dbname), &[])
             .await
             .map_err(classify_pg_error)?;
         conn.client
-            .execute(&format!("CREATE DATABASE \"{}\"", dbname), &[])
+            .execute(&format!("CREATE DATABASE {}", quoted_dbname), &[])
             .await
             .map_err(classify_pg_error)?;
         drop(conn);

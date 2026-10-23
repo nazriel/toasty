@@ -93,6 +93,11 @@ fn render_values_pg(expr: Expr) -> String {
 
 /// `SELECT id FROM users` against a schema with a single `users(id)` table.
 fn select_id_from_users() -> stmt::Statement {
+    select_column(0)
+}
+
+/// `SELECT <column> FROM <table 0>` against a schema with a single table.
+fn select_column(column: usize) -> stmt::Statement {
     let source = Source::Table(SourceTable {
         tables: vec![TableRef::Table(TableId(0))],
         from: vec![TableWithJoins {
@@ -101,7 +106,7 @@ fn select_id_from_users() -> stmt::Statement {
         }],
     });
     let select = Select {
-        returning: Returning::Project(Expr::record([col(0, 0)])),
+        returning: Returning::Project(Expr::record([col(0, column)])),
         source,
         filter: Filter::ALL,
         distinct: false,
@@ -199,6 +204,33 @@ fn ident_quoting_mysql_backtick() {
     let sql = Serializer::mysql(&schema).serialize(&SqlStatement::from(stmt));
 
     expect!["SELECT tbl_0_0.`id` AS column_0 FROM `users` AS tbl_0_0;"].assert_eq(&sql);
+}
+
+/// A table `a"b` with a column ``c`d``: each dialect doubles only its own
+/// quote character.
+fn quote_char_schema() -> Schema {
+    Schema {
+        tables: vec![make_table(0, "a\"b", &["c`d"])],
+    }
+}
+
+#[test]
+fn ident_quoting_doubles_double_quote_postgresql_and_sqlite() {
+    let stmt = SqlStatement::from(select_column(1));
+
+    let pg = Serializer::postgresql(&quote_char_schema()).serialize(&stmt);
+    expect![[r#"SELECT tbl_0_0."c`d" AS column1 FROM "a""b" AS tbl_0_0;"#]].assert_eq(&pg);
+
+    let sqlite = Serializer::sqlite(&quote_char_schema()).serialize(&stmt);
+    expect![[r#"SELECT tbl_0_0."c`d" AS column1 FROM "a""b" AS tbl_0_0;"#]].assert_eq(&sqlite);
+}
+
+#[test]
+fn ident_quoting_doubles_backtick_mysql() {
+    let stmt = SqlStatement::from(select_column(1));
+
+    let mysql = Serializer::mysql(&quote_char_schema()).serialize(&stmt);
+    expect!["SELECT tbl_0_0.`c``d` AS column_0 FROM `a\"b` AS tbl_0_0;"].assert_eq(&mysql);
 }
 
 // -----------------------------------------------------------------------------
