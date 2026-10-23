@@ -160,6 +160,31 @@ fn value_string_with_single_quote() {
 }
 
 #[test]
+fn value_string_backslash_per_flavor() {
+    // A backslash is literal on PostgreSQL and SQLite, but MySQL and MariaDB
+    // read it as an escape by default, so it doubles there. The quote doubles
+    // everywhere.
+    let literal = || Expr::Value(stmt::Value::String("a\\b'c".into()));
+    let values = |expr: Expr| {
+        let values = stmt::Values::new(vec![Expr::record([expr])]);
+        SqlStatement::from(stmt::Statement::from(stmt::Query::values(values)))
+    };
+    let schema = Schema::default();
+
+    let pg = Serializer::postgresql(&schema).serialize(&values(literal()));
+    expect![[r#"VALUES ('a\b''c');"#]].assert_eq(&pg);
+
+    let sqlite = Serializer::sqlite(&schema).serialize(&values(literal()));
+    expect![[r#"VALUES ('a\b''c');"#]].assert_eq(&sqlite);
+
+    let mysql = Serializer::mysql(&schema).serialize(&values(literal()));
+    expect![[r#"VALUES ROW('a\\b''c');"#]].assert_eq(&mysql);
+
+    let mariadb = Serializer::mariadb(&schema).serialize(&values(literal()));
+    expect![[r#"SELECT 'a\\b''c' AS column_0;"#]].assert_eq(&mariadb);
+}
+
+#[test]
 fn value_list() {
     let list = stmt::Value::List(vec![stmt::Value::I64(1), stmt::Value::I64(2)]);
     expect!["VALUES ((1, 2));"].assert_eq(&render_values_pg(Expr::Value(list)));

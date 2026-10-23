@@ -29,12 +29,19 @@ impl ToSql for &stmt::Value {
             // reaching the serializer.
             String(s) => {
                 f.dst.push('\'');
-                // Escape single quotes by doubling them.
-                for ch in s.chars() {
-                    if ch == '\'' {
-                        f.dst.push('\'');
+                // Escape single quotes by doubling them. MySQL and MariaDB also
+                // read a backslash as an escape by default, so it doubles there.
+                let escape_backslash = f.serializer.is_mysql();
+                let needs_escape = |ch: char| ch == '\'' || (escape_backslash && ch == '\\');
+                if s.contains(needs_escape) {
+                    for ch in s.chars() {
+                        if needs_escape(ch) {
+                            f.dst.push(ch);
+                        }
+                        f.dst.push(ch);
                     }
-                    f.dst.push(ch);
+                } else {
+                    f.dst.push_str(s);
                 }
                 f.dst.push('\'');
             }
