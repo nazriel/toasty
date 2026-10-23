@@ -563,9 +563,24 @@ fn float4_to_value(v: f32, column: &Column, expected_ty: &stmt::Type) -> Result<
     })
 }
 
+/// Whether `v` is finite and beyond the range of `f32`. Such a value would
+/// become an infinity in a `float4` column.
+fn exceeds_f32(v: f64) -> bool {
+    v.is_finite() && v.abs() > f32::MAX as f64
+}
+
+/// `v` as the `f32` a `float4` column holds. A value that [`exceeds_f32`] is an
+/// error; anything in range is rounded to the nearest `f32`.
+fn f64_to_f32(v: f64) -> Result<f32> {
+    if exceeds_f32(v) {
+        return Err(Error::type_conversion(stmt::Value::F64(v), "f32"));
+    }
+    Ok(v as f32)
+}
+
 fn float8_to_value(v: f64, column: &Column, expected_ty: &stmt::Type) -> Result<stmt::Value> {
     Ok(match expected_ty {
-        stmt::Type::F32 => stmt::Value::F32(v as f32),
+        stmt::Type::F32 => stmt::Value::F32(f64_to_f32(v)?),
         stmt::Type::F64 => stmt::Value::F64(v),
         _ => return Err(mismatch(column, expected_ty)),
     })
@@ -851,6 +866,9 @@ fn value_to_sql(
         }
         (stmt::Value::F32(value), &Type::FLOAT4) => value.to_sql(ty, out),
         (stmt::Value::F32(value), &Type::FLOAT8) => (*value as f64).to_sql(ty, out),
+        (stmt::Value::F64(value), &Type::FLOAT4) if exceeds_f32(*value) => {
+            Err(format!("f64 value {value} is out of range for the PostgreSQL type `{ty}`").into())
+        }
         (stmt::Value::F64(value), &Type::FLOAT4) => (*value as f32).to_sql(ty, out),
         (stmt::Value::F64(value), &Type::FLOAT8) => value.to_sql(ty, out),
         (stmt::Value::Null, _) => Ok(IsNull::Yes),
@@ -1017,5 +1035,28 @@ mod tests {
     fn out_of_range_list_element_is_an_error() {
         let list = stmt::Value::List(vec![stmt::Value::I64(1), stmt::Value::I64(i64::MAX)]);
         assert!(bind(list, &Type::INT4_ARRAY).is_err());
+    }
+
+    #[test]
+    fn f64_beyond_f32_range_is_an_error_for_float4() {
+        let err = bind(stmt::Value::F64(1e300), &Type::FLOAT4).unwrap_err();
+        assert!(err.contains("float4"), "{err}");
+        assert!(bind(stmt::Value::F64(-1e300), &Type::FLOAT4).is_err());
+    }
+
+    #[test]
+    fn f64_in_range_binds_to_float4() {
+        assert!(bind(stmt::Value::F64(1.5), &Type::FLOAT4).is_ok());
+        assert!(bind(stmt::Value::F64(f32::MAX as f64), &Type::FLOAT4).is_ok());
+        // Non-finite values are not out of range: they keep their meaning.
+        assert!(bind(stmt::Value::F64(f64::INFINITY), &Type::FLOAT4).is_ok());
+        assert!(bind(stmt::Value::F64(f64::NAN), &Type::FLOAT4).is_ok());
+    }
+
+    #[test]
+    fn f64_beyond_f32_range_decodes_as_an_error() {
+        let err = f64_to_f32(1e300).unwrap_err();
+        assert!(err.is_type_conversion(), "{err}");
+        assert_eq!(f64_to_f32(1.5).unwrap(), 1.5);
     }
 }
