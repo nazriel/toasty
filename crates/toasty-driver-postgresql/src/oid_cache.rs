@@ -1,6 +1,6 @@
 use hashbrown::{HashMap, HashSet};
 
-use toasty_core::{Result, schema::db};
+use toasty_core::{Error, Result, schema::db};
 use tokio_postgres::{
     Client,
     types::{Kind, Type},
@@ -39,10 +39,12 @@ impl OidCache {
         for ty in types {
             collect_enum_names(ty, &mut names);
         }
-        let uncached: Vec<String> = names
+        let mut uncached: Vec<String> = names
             .into_iter()
             .filter(|name| !self.enum_types.contains_key(name))
             .collect();
+        // Sorted so the type reported as missing is the same on every run.
+        uncached.sort();
 
         if uncached.is_empty() {
             return Ok(());
@@ -76,11 +78,11 @@ impl OidCache {
             .map_err(toasty_core::Error::driver_operation_failed)?;
 
         for row in &rows {
-            let name: String = row.get(0);
-            let oid: u32 = row.get(1);
-            let array_oid: u32 = row.get(2);
-            let schema: String = row.get(3);
-            let variants: Vec<String> = row.get(4);
+            let name: String = row.try_get(0).map_err(Error::driver_operation_failed)?;
+            let oid: u32 = row.try_get(1).map_err(Error::driver_operation_failed)?;
+            let array_oid: u32 = row.try_get(2).map_err(Error::driver_operation_failed)?;
+            let schema: String = row.try_get(3).map_err(Error::driver_operation_failed)?;
+            let variants: Vec<String> = row.try_get(4).map_err(Error::driver_operation_failed)?;
 
             let enum_type = Type::new(name.clone(), oid, Kind::Enum(variants), schema.clone());
             let array_type = Type::new(
@@ -93,34 +95,48 @@ impl OidCache {
             self.enum_array_types.insert(name, array_type);
         }
 
+        // The query returns a row only for a name that resolves to an enum
+        // type, so a requested name without one is not in the database (or is
+        // not visible through the session's `search_path`).
+        if let Some(missing) = uncached
+            .iter()
+            .find(|name| !self.enum_types.contains_key(*name))
+        {
+            return Err(missing_enum_type(missing));
+        }
+
         Ok(())
     }
 
     /// Look up the PostgreSQL wire type for a `db::Type`. Recurses into
     /// `List(elem)` so list-of-enum and list-of-scalar both resolve to the
-    /// correct array OID. Panics if an enum type was not preloaded.
-    pub fn get(&self, ty: &db::Type) -> &Type {
+    /// correct array OID. Fails with `invalid_schema` if an enum type was not
+    /// preloaded, and with `unsupported_feature` for a type with no mapping.
+    pub fn get(&self, ty: &db::Type) -> Result<&Type> {
         match ty {
-            db::Type::Enum(type_enum) if type_enum.name.is_some() => {
-                let name = type_enum.name.as_ref().unwrap();
-                self.enum_types.get(name).unwrap_or_else(|| {
-                    panic!("enum type '{name}' not preloaded — call preload() before get()")
-                })
-            }
+            db::Type::Enum(type_enum) => match &type_enum.name {
+                Some(name) => self
+                    .enum_types
+                    .get(name)
+                    .ok_or_else(|| missing_enum_type(name)),
+                None => to_postgres_type(ty),
+            },
             db::Type::List(elem) => match elem.as_ref() {
-                db::Type::Enum(type_enum) if type_enum.name.is_some() => {
-                    let name = type_enum.name.as_ref().unwrap();
-                    self.enum_array_types.get(name).unwrap_or_else(|| {
-                        panic!(
-                            "enum array type '_{name}' not preloaded — call preload() before get()"
-                        )
-                    })
-                }
-                _ => array_type_of(self.get(elem)),
+                db::Type::Enum(db::TypeEnum {
+                    name: Some(name), ..
+                }) => self
+                    .enum_array_types
+                    .get(name)
+                    .ok_or_else(|| missing_enum_type(name)),
+                _ => array_type_of(self.get(elem)?),
             },
             _ => to_postgres_type(ty),
         }
     }
+}
+
+fn missing_enum_type(name: &str) -> Error {
+    Error::invalid_schema(format!("enum type `{name}` does not exist in the database"))
 }
 
 /// Walk a `db::Type` and collect every named enum's typname. Recurses into
@@ -214,7 +230,7 @@ mod tests {
         cache.preload(&client, [&db_enum(&name)]).await.unwrap();
 
         assert_eq!(
-            cache.get(&db_enum(&name)).kind(),
+            cache.get(&db_enum(&name)).unwrap().kind(),
             &Kind::Enum(vec!["pending".into(), "active".into(), "done".into()])
         );
 
@@ -235,8 +251,10 @@ mod tests {
         let mut cache = OidCache::new();
         cache.preload(&client, [&db_enum(&name)]).await.unwrap();
 
-        let scalar = cache.get(&db_enum(&name));
-        let list = cache.get(&db::Type::List(Box::new(db_enum(&name))));
+        let scalar = cache.get(&db_enum(&name)).unwrap();
+        let list = cache
+            .get(&db::Type::List(Box::new(db_enum(&name))))
+            .unwrap();
 
         assert_eq!(list.name(), format!("_{name}"));
         match list.kind() {
@@ -263,10 +281,10 @@ mod tests {
 
         // Both lookups succeed without further preloads.
         assert_eq!(
-            cache.get(&db_enum(&name)).kind(),
+            cache.get(&db_enum(&name)).unwrap().kind(),
             &Kind::Enum(vec!["x".into(), "y".into()])
         );
-        assert_eq!(cache.get(&list_ty).name(), format!("_{name}"));
+        assert_eq!(cache.get(&list_ty).unwrap().name(), format!("_{name}"));
 
         drop_enum(&client, &name).await;
     }
@@ -276,11 +294,15 @@ mod tests {
     async fn list_of_scalar_resolves_without_preload() {
         let cache = OidCache::new();
         assert_eq!(
-            cache.get(&db::Type::List(Box::new(db::Type::Integer(8)))),
+            cache
+                .get(&db::Type::List(Box::new(db::Type::Integer(8))))
+                .unwrap(),
             &Type::INT8_ARRAY
         );
         assert_eq!(
-            cache.get(&db::Type::List(Box::new(db::Type::Text))),
+            cache
+                .get(&db::Type::List(Box::new(db::Type::Text)))
+                .unwrap(),
             &Type::TEXT_ARRAY
         );
     }
@@ -296,9 +318,9 @@ mod tests {
 
         let mut cache = OidCache::new();
         cache.preload(&client, [&db_enum(&name)]).await.unwrap();
-        let first = cache.get(&db_enum(&name)).clone();
+        let first = cache.get(&db_enum(&name)).unwrap().clone();
         cache.preload(&client, [&db_enum(&name)]).await.unwrap();
-        let second = cache.get(&db_enum(&name));
+        let second = cache.get(&db_enum(&name)).unwrap();
         assert_eq!(&first, second);
 
         drop_enum(&client, &name).await;
@@ -332,7 +354,7 @@ mod tests {
             .unwrap();
         let mut cache = OidCache::new();
         cache.preload(&client, [&db_enum("status")]).await.unwrap();
-        let ty = cache.get(&db_enum("status"));
+        let ty = cache.get(&db_enum("status")).unwrap();
         assert_eq!(ty.kind(), &Kind::Enum(vec!["a1".into(), "a2".into()]));
         assert_eq!(ty.schema(), schema_a);
 
@@ -343,7 +365,7 @@ mod tests {
         let mut cache = OidCache::new();
         cache.preload(&client, [&db_enum("status")]).await.unwrap();
         assert_eq!(
-            cache.get(&db_enum("status")).kind(),
+            cache.get(&db_enum("status")).unwrap().kind(),
             &Kind::Enum(vec!["b1".into()])
         );
 
@@ -371,15 +393,53 @@ mod tests {
         cache.preload(&client, types.iter()).await.unwrap();
 
         assert_eq!(
-            cache.get(&db_enum(&a)).kind(),
+            cache.get(&db_enum(&a)).unwrap().kind(),
             &Kind::Enum(vec!["one".into()])
         );
         assert_eq!(
-            cache.get(&db_enum(&b)).kind(),
+            cache.get(&db_enum(&b)).unwrap().kind(),
             &Kind::Enum(vec!["red".into(), "blue".into()])
         );
 
         drop_enum(&client, &a).await;
         drop_enum(&client, &b).await;
+    }
+
+    /// A named enum that is not in the database fails the preload with
+    /// `invalid_schema`, and `get` on a name that was never preloaded fails
+    /// the same way instead of panicking.
+    #[tokio::test]
+    async fn missing_enum_type_is_an_invalid_schema_error() {
+        let Some(client) = try_connect().await else {
+            return;
+        };
+        let name = enum_name("absent");
+
+        let mut cache = OidCache::new();
+        let err = cache.preload(&client, [&db_enum(&name)]).await.unwrap_err();
+        assert!(err.is_invalid_schema());
+
+        let err = cache.get(&db_enum(&name)).unwrap_err();
+        assert!(err.is_invalid_schema());
+        let list = db::Type::List(Box::new(db_enum(&name)));
+        assert!(cache.get(&list).unwrap_err().is_invalid_schema());
+    }
+
+    /// One missing name among present ones still fails the preload.
+    #[tokio::test]
+    async fn one_missing_enum_type_fails_the_whole_preload() {
+        let Some(client) = try_connect().await else {
+            return;
+        };
+        let present = enum_name("present");
+        let absent = enum_name("absent_among");
+        create_enum(&client, &present, &["only"]).await;
+
+        let mut cache = OidCache::new();
+        let types = [db_enum(&present), db_enum(&absent)];
+        let err = cache.preload(&client, types.iter()).await.unwrap_err();
+        assert!(err.is_invalid_schema());
+
+        drop_enum(&client, &present).await;
     }
 }

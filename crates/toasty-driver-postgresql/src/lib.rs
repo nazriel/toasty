@@ -401,10 +401,10 @@ impl Connection {
         self.oid_cache
             .preload(&self.client, typed_params.iter().map(|tv| &tv.ty))
             .await?;
-        let param_types: Vec<_> = typed_params
+        let param_types = typed_params
             .iter()
-            .map(|tv| self.oid_cache.get(&tv.ty).clone())
-            .collect();
+            .map(|tv| self.oid_cache.get(&tv.ty).cloned())
+            .collect::<Result<Vec<_>>>()?;
 
         let values: Vec<_> = typed_params
             .into_iter()
@@ -442,15 +442,24 @@ impl Connection {
             let mut results = Vec::new();
 
             match &ret {
+                // Returned above, before the rows are queried.
                 SqlReturn::Count => unreachable!(),
                 SqlReturn::Infer => {
                     for (i, column) in row.columns().iter().enumerate() {
-                        results.push(Value::from_sql_infer(i, &row, column).into_inner());
+                        results.push(Value::from_sql_infer(i, &row, column)?.into_inner());
                     }
                 }
                 SqlReturn::Types(ret_tys) => {
                     for (i, column) in row.columns().iter().enumerate() {
-                        results.push(Value::from_sql(i, &row, column, &ret_tys[i]).into_inner());
+                        let Some(expected_ty) = ret_tys.get(i) else {
+                            return Err(toasty_core::Error::invalid_result(format!(
+                                "the statement returned column `{}` at position {i}, \
+                                 but only {} columns are expected",
+                                column.name(),
+                                ret_tys.len()
+                            )));
+                        };
+                        results.push(Value::from_sql(i, &row, column, expected_ty)?.into_inner());
                     }
                 }
             }
@@ -539,13 +548,22 @@ impl toasty_core::driver::Connection for Connection {
                 };
                 return self.exec_sql(&op.sql, op.params, ret).await;
             }
-            op => todo!("op={:#?}", op),
+            op => {
+                return Err(toasty_core::Error::unsupported_feature(format!(
+                    "the PostgreSQL driver does not support the operation `{}`",
+                    op.name()
+                )));
+            }
         };
 
         let sql_as_str = sql::Serializer::postgresql(&schema.db).serialize(&sql);
 
         let ret = if sql.returning_len().is_some() {
-            SqlReturn::Types(ret_tys.unwrap())
+            SqlReturn::Types(ret_tys.ok_or_else(|| {
+                toasty_core::Error::invalid_result(
+                    "the statement returns rows but carries no result types",
+                )
+            })?)
         } else {
             SqlReturn::Count
         };
@@ -608,13 +626,12 @@ impl toasty_core::driver::Connection for Connection {
             .await
             .map_err(classify_pg_error)?;
 
-        Ok(rows
-            .iter()
+        rows.iter()
             .map(|row| {
-                let id: i64 = row.get(0);
-                toasty_core::schema::db::AppliedMigration::new(id as u64)
+                let id: i64 = row.try_get(0).map_err(classify_pg_error)?;
+                Ok(toasty_core::schema::db::AppliedMigration::new(id as u64))
             })
-            .collect())
+            .collect()
     }
 
     async fn apply_migration(

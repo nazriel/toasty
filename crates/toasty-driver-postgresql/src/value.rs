@@ -2,9 +2,13 @@ use fallible_iterator::FallibleIterator;
 use postgres_protocol::types::{ArrayDimension, array_from_sql, array_to_sql};
 #[cfg(feature = "net")]
 use postgres_protocol::types::{inet_from_sql, inet_to_sql, macaddr_from_sql};
-use toasty_core::stmt::{self, Value as CoreValue};
+use std::fmt::Display;
 #[cfg(feature = "net")]
 use toasty_core::stmt::{IpCidr, IpInet, MacAddr6, MacAddr8};
+use toasty_core::{
+    Error, Result,
+    stmt::{self, Value as CoreValue},
+};
 use tokio_postgres::{
     Column, Row,
     types::{FromSql, IsNull, Kind, ToSql, Type, private::BytesMut, to_sql_checked},
@@ -68,19 +72,25 @@ impl Value {
     }
 
     /// Converts a PostgreSQL value within a row to a Toasty value.
+    ///
+    /// Fails with `invalid_result` when the column's PostgreSQL type does not
+    /// match `expected_ty` or its wire data is malformed, with
+    /// `type_conversion` when the value does not fit `expected_ty`, and with
+    /// `unsupported_feature` when the column needs a cargo feature the driver
+    /// was built without, or a type the driver cannot decode.
     pub(crate) fn from_sql(
         index: usize,
         row: &Row,
         column: &Column,
         expected_ty: &stmt::Type,
-    ) -> Self {
+    ) -> Result<Self> {
         // Gets the value from the row as Option<T> and return stmt::Value::Null if the Option is
         // None.
         macro_rules! get_or_return_null {
             ($ty:ty) => {{
-                match row.get::<usize, Option<$ty>>(index) {
+                match get_opt::<$ty>(row, index, column)? {
                     Some(inner) => inner,
-                    None => return Self(stmt::Value::Null),
+                    None => return Ok(Self(stmt::Value::Null)),
                 }
             }};
         }
@@ -88,15 +98,15 @@ impl Value {
         // NOTE: unfortunately, the inner representation of the PostgreSQL type enum is not
         // accessible, so we must manually match each type like so.
         let core_value = if column.type_() == &Type::TEXT || column.type_() == &Type::VARCHAR {
-            text_to_value(get_or_return_null!(String), expected_ty)
+            text_to_value(get_or_return_null!(String), expected_ty)?
         } else if column.type_() == &Type::BOOL {
             stmt::Value::Bool(get_or_return_null!(bool))
         } else if column.type_() == &Type::INT2 {
-            int2_to_value(get_or_return_null!(i16), expected_ty)
+            int2_to_value(get_or_return_null!(i16), column, expected_ty)?
         } else if column.type_() == &Type::INT4 {
-            int4_to_value(get_or_return_null!(i32), expected_ty)
+            int4_to_value(get_or_return_null!(i32), expected_ty)?
         } else if column.type_() == &Type::INT8 {
-            int8_to_value(get_or_return_null!(i64), expected_ty)
+            int8_to_value(get_or_return_null!(i64), expected_ty)?
         } else if column.type_() == &Type::UUID {
             let v = get_or_return_null!(uuid::Uuid);
             match expected_ty {
@@ -105,15 +115,7 @@ impl Value {
                 _ => stmt::Value::Uuid(v),
             }
         } else if column.type_() == &Type::BYTEA {
-            let v = get_or_return_null!(Vec<u8>);
-            match expected_ty {
-                stmt::Type::Uuid => stmt::Value::Uuid(v.try_into().expect("invalid uuid bytes")),
-                stmt::Type::Bytes => stmt::Value::Bytes(v),
-                _ => todo!(
-                    "unsupported conversion from {:#?} to {expected_ty:?}",
-                    column.type_()
-                ),
-            }
+            bytea_to_value(get_or_return_null!(Vec<u8>), column, expected_ty)?
         } else if column.type_() == &Type::TIMESTAMPTZ {
             #[cfg(feature = "jiff")]
             {
@@ -121,7 +123,7 @@ impl Value {
             }
             #[cfg(not(feature = "jiff"))]
             {
-                panic!("TIMESTAMPTZ requires jiff feature to be enabled")
+                return Err(feature_required(column.type_(), "jiff"));
             }
         } else if column.type_() == &Type::TIMESTAMP {
             #[cfg(feature = "jiff")]
@@ -130,7 +132,7 @@ impl Value {
             }
             #[cfg(not(feature = "jiff"))]
             {
-                panic!("TIMESTAMP requires jiff feature to be enabled")
+                return Err(feature_required(column.type_(), "jiff"));
             }
         } else if column.type_() == &Type::DATE {
             #[cfg(feature = "jiff")]
@@ -139,7 +141,7 @@ impl Value {
             }
             #[cfg(not(feature = "jiff"))]
             {
-                panic!("DATE requires jiff feature to be enabled")
+                return Err(feature_required(column.type_(), "jiff"));
             }
         } else if column.type_() == &Type::TIME {
             #[cfg(feature = "jiff")]
@@ -148,52 +150,52 @@ impl Value {
             }
             #[cfg(not(feature = "jiff"))]
             {
-                panic!("TIME requires jiff feature to be enabled")
+                return Err(feature_required(column.type_(), "jiff"));
             }
         } else if column.type_() == &Type::CIDR {
             #[cfg(feature = "net")]
             {
                 let raw = get_or_return_null!(RawBytes<'_>).0;
-                stmt::Value::Cidr(decode_cidr(raw))
+                stmt::Value::Cidr(decode_cidr(raw, column)?)
             }
             #[cfg(not(feature = "net"))]
             {
-                panic!("CIDR requires net feature to be enabled")
+                return Err(feature_required(column.type_(), "net"));
             }
         } else if column.type_() == &Type::INET {
             #[cfg(feature = "net")]
             {
                 let raw = get_or_return_null!(RawBytes<'_>).0;
-                stmt::Value::Inet(decode_inet(raw))
+                stmt::Value::Inet(decode_inet(raw, column)?)
             }
             #[cfg(not(feature = "net"))]
             {
-                panic!("INET requires net feature to be enabled")
+                return Err(feature_required(column.type_(), "net"));
             }
         } else if column.type_() == &Type::MACADDR {
             #[cfg(feature = "net")]
             {
                 let raw = get_or_return_null!(RawBytes<'_>).0;
-                stmt::Value::MacAddr(decode_macaddr(raw))
+                stmt::Value::MacAddr(decode_macaddr(raw, column)?)
             }
             #[cfg(not(feature = "net"))]
             {
-                panic!("MACADDR requires net feature to be enabled")
+                return Err(feature_required(column.type_(), "net"));
             }
         } else if column.type_() == &Type::MACADDR8 {
             #[cfg(feature = "net")]
             {
                 let raw = get_or_return_null!(RawBytes<'_>).0;
-                stmt::Value::MacAddr8(decode_macaddr8(raw))
+                stmt::Value::MacAddr8(decode_macaddr8(raw, column)?)
             }
             #[cfg(not(feature = "net"))]
             {
-                panic!("MACADDR8 requires net feature to be enabled")
+                return Err(feature_required(column.type_(), "net"));
             }
         } else if column.type_() == &Type::FLOAT4 {
-            float4_to_value(get_or_return_null!(f32), expected_ty)
+            float4_to_value(get_or_return_null!(f32), column, expected_ty)?
         } else if column.type_() == &Type::FLOAT8 {
-            float8_to_value(get_or_return_null!(f64), expected_ty)
+            float8_to_value(get_or_return_null!(f64), column, expected_ty)?
         } else if column.type_() == &Type::NUMERIC {
             #[cfg(feature = "rust_decimal")]
             {
@@ -201,26 +203,30 @@ impl Value {
             }
             #[cfg(not(feature = "rust_decimal"))]
             {
-                panic!("NUMERIC requires rust_decimal feature to be enabled")
+                return Err(feature_required(column.type_(), "rust_decimal"));
             }
         } else if matches!(column.type_().kind(), Kind::Enum(_)) {
             // Native database enum types (CREATE TYPE ... AS ENUM) are read as strings.
             // We use EnumString instead of String because String::FromSql::accepts()
             // rejects custom enum types.
-            match row.get::<usize, Option<EnumString>>(index) {
+            match get_opt::<EnumString>(row, index, column)? {
                 Some(EnumString(v)) => stmt::Value::String(v),
-                None => return Self(stmt::Value::Null),
+                None => return Ok(Self(stmt::Value::Null)),
             }
         } else if column.type_() == &Type::JSONB || column.type_() == &Type::JSON {
-            let raw = match row.get::<usize, Option<RawBytes<'_>>>(index) {
+            let raw = match get_opt::<RawBytes<'_>>(row, index, column)? {
                 Some(RawBytes(raw)) => raw,
-                None => return Self(stmt::Value::Null),
+                None => return Ok(Self(stmt::Value::Null)),
             };
             // `jsonb` wire format: a 1-byte version header, then UTF-8 JSON
             // text. `json` is plain UTF-8 text.
             let json_bytes = if column.type_() == &Type::JSONB {
-                assert_eq!(raw.first(), Some(&1), "unsupported jsonb wire version");
-                &raw[1..]
+                match raw.split_first() {
+                    Some((1, rest)) => rest,
+                    _ => {
+                        return Err(read_error(column, "unsupported jsonb wire version"));
+                    }
+                }
             } else {
                 raw
             };
@@ -231,15 +237,15 @@ impl Value {
                 // `String::from_utf8` reuses this single allocation.
                 stmt::Value::String(
                     String::from_utf8(json_bytes.to_vec())
-                        .expect("PostgreSQL returned non-UTF-8 JSON"),
+                        .map_err(|e| read_error(column, format!("non-UTF-8 JSON: {e}")))?,
                 )
             } else {
                 // `#[document]` columns are queryable by the engine, so decode
                 // them to their structural `Value::Object` representation.
                 toasty_sql::json::from_slice(json_bytes, expected_ty)
-                    .expect("invalid JSON in document column")
+                    .map_err(|e| read_error(column, format!("invalid JSON: {e}")))?
             }
-        } else if let Kind::Array(_) = column.type_().kind() {
+        } else if let Kind::Array(elem_pg_ty) = column.type_().kind() {
             // Native array column (e.g. `text[]`, `int8[]`) — decoded
             // directly into `Vec<stmt::Value>` via `array_from_sql`. The
             // element type is taken from `expected_ty.as_list_unwrap()` so
@@ -247,31 +253,34 @@ impl Value {
             // type.
             let elem_ty = match expected_ty {
                 stmt::Type::List(elem) => elem.as_ref(),
-                other => panic!("array column expected stmt::Type::List, got {other:?}"),
+                other => return Err(mismatch(column, other)),
             };
-            let items = read_array_items(index, row, column, elem_ty);
-            match items {
+            match read_array_items(index, row, column, elem_pg_ty, elem_ty)? {
                 Some(items) => stmt::Value::List(items),
-                None => return Self(stmt::Value::Null),
+                None => return Ok(Self(stmt::Value::Null)),
             }
         } else {
-            todo!(
-                "implement PostgreSQL to toasty conversion for `{:#?}`",
-                column.type_()
-            );
+            return Err(Error::unsupported_feature(format!(
+                "the PostgreSQL driver cannot read the type `{}` of column `{}`",
+                column.type_(),
+                column.name()
+            )));
         };
 
-        Value(core_value)
+        Ok(Value(core_value))
     }
 
     /// Converts a PostgreSQL value within a row using PostgreSQL column
     /// metadata as the Toasty value type.
-    pub(crate) fn from_sql_infer(index: usize, row: &Row, column: &Column) -> Self {
+    ///
+    /// Fails with `unsupported_feature` for a column type that cannot be
+    /// inferred, or that needs a cargo feature the driver was built without.
+    pub(crate) fn from_sql_infer(index: usize, row: &Row, column: &Column) -> Result<Self> {
         macro_rules! get_or_return_null {
             ($ty:ty) => {{
-                match row.get::<usize, Option<$ty>>(index) {
+                match get_opt::<$ty>(row, index, column)? {
                     Some(inner) => inner,
-                    None => return Self(stmt::Value::Null),
+                    None => return Ok(Self(stmt::Value::Null)),
                 }
             }};
         }
@@ -297,7 +306,7 @@ impl Value {
             }
             #[cfg(not(feature = "jiff"))]
             {
-                panic!("TIMESTAMPTZ requires jiff feature to be enabled")
+                return Err(feature_required(column.type_(), "jiff"));
             }
         } else if column.type_() == &Type::TIMESTAMP {
             #[cfg(feature = "jiff")]
@@ -306,7 +315,7 @@ impl Value {
             }
             #[cfg(not(feature = "jiff"))]
             {
-                panic!("TIMESTAMP requires jiff feature to be enabled")
+                return Err(feature_required(column.type_(), "jiff"));
             }
         } else if column.type_() == &Type::DATE {
             #[cfg(feature = "jiff")]
@@ -315,7 +324,7 @@ impl Value {
             }
             #[cfg(not(feature = "jiff"))]
             {
-                panic!("DATE requires jiff feature to be enabled")
+                return Err(feature_required(column.type_(), "jiff"));
             }
         } else if column.type_() == &Type::TIME {
             #[cfg(feature = "jiff")]
@@ -324,47 +333,47 @@ impl Value {
             }
             #[cfg(not(feature = "jiff"))]
             {
-                panic!("TIME requires jiff feature to be enabled")
+                return Err(feature_required(column.type_(), "jiff"));
             }
         } else if column.type_() == &Type::CIDR {
             #[cfg(feature = "net")]
             {
                 let raw = get_or_return_null!(RawBytes<'_>).0;
-                stmt::Value::Cidr(decode_cidr(raw))
+                stmt::Value::Cidr(decode_cidr(raw, column)?)
             }
             #[cfg(not(feature = "net"))]
             {
-                panic!("CIDR requires net feature to be enabled")
+                return Err(feature_required(column.type_(), "net"));
             }
         } else if column.type_() == &Type::INET {
             #[cfg(feature = "net")]
             {
                 let raw = get_or_return_null!(RawBytes<'_>).0;
-                stmt::Value::Inet(decode_inet(raw))
+                stmt::Value::Inet(decode_inet(raw, column)?)
             }
             #[cfg(not(feature = "net"))]
             {
-                panic!("INET requires net feature to be enabled")
+                return Err(feature_required(column.type_(), "net"));
             }
         } else if column.type_() == &Type::MACADDR {
             #[cfg(feature = "net")]
             {
                 let raw = get_or_return_null!(RawBytes<'_>).0;
-                stmt::Value::MacAddr(decode_macaddr(raw))
+                stmt::Value::MacAddr(decode_macaddr(raw, column)?)
             }
             #[cfg(not(feature = "net"))]
             {
-                panic!("MACADDR requires net feature to be enabled")
+                return Err(feature_required(column.type_(), "net"));
             }
         } else if column.type_() == &Type::MACADDR8 {
             #[cfg(feature = "net")]
             {
                 let raw = get_or_return_null!(RawBytes<'_>).0;
-                stmt::Value::MacAddr8(decode_macaddr8(raw))
+                stmt::Value::MacAddr8(decode_macaddr8(raw, column)?)
             }
             #[cfg(not(feature = "net"))]
             {
-                panic!("MACADDR8 requires net feature to be enabled")
+                return Err(feature_required(column.type_(), "net"));
             }
         } else if column.type_() == &Type::FLOAT4 {
             stmt::Value::F32(get_or_return_null!(f32))
@@ -377,21 +386,90 @@ impl Value {
             }
             #[cfg(not(feature = "rust_decimal"))]
             {
-                panic!("NUMERIC requires rust_decimal feature to be enabled")
+                return Err(feature_required(column.type_(), "rust_decimal"));
             }
         } else if matches!(column.type_().kind(), Kind::Enum(_)) {
-            match row.get::<usize, Option<EnumString>>(index) {
+            match get_opt::<EnumString>(row, index, column)? {
                 Some(EnumString(v)) => stmt::Value::String(v),
-                None => return Self(stmt::Value::Null),
+                None => return Ok(Self(stmt::Value::Null)),
+            }
+        } else if column.type_() == &Type::VOID {
+            // A function returning `void` (e.g. `pg_advisory_lock`) yields a
+            // value with no content.
+            stmt::Value::Null
+        } else if let Kind::Array(elem_pg_ty) = column.type_().kind() {
+            // One-dimensional arrays of the element types inferred above.
+            let elem_ty = infer_array_element_ty(elem_pg_ty);
+            match read_array_items(index, row, column, elem_pg_ty, &elem_ty)? {
+                Some(items) => stmt::Value::List(items),
+                None => return Ok(Self(stmt::Value::Null)),
             }
         } else {
-            todo!(
-                "implement PostgreSQL raw SQL inference for `{:#?}`",
-                column.type_()
-            );
+            return Err(Error::unsupported_feature(format!(
+                "the PostgreSQL driver cannot infer the type `{}` of column `{}`",
+                column.type_(),
+                column.name()
+            )));
         };
 
-        Value(core_value)
+        Ok(Value(core_value))
+    }
+}
+
+/// Reads column `index` as `Option<T>`, answering `invalid_result` when the
+/// column's PostgreSQL type is not one `T` accepts.
+fn get_opt<'a, T: FromSql<'a>>(row: &'a Row, index: usize, column: &Column) -> Result<Option<T>> {
+    row.try_get::<usize, Option<T>>(index)
+        .map_err(|e| read_error(column, e))
+}
+
+/// An `invalid_result` error for a column whose data cannot be read.
+fn read_error(column: &Column, cause: impl Display) -> Error {
+    Error::invalid_result(format!(
+        "cannot read column `{}` of PostgreSQL type `{}`: {cause}",
+        column.name(),
+        column.type_()
+    ))
+}
+
+/// An `invalid_result` error for a column whose PostgreSQL type has no
+/// conversion to the type the statement expects.
+fn mismatch(column: &Column, expected_ty: &stmt::Type) -> Error {
+    Error::invalid_result(format!(
+        "column `{}` has PostgreSQL type `{}`, which cannot be read as {expected_ty:?}",
+        column.name(),
+        column.type_()
+    ))
+}
+
+/// An `unsupported_feature` error for a PostgreSQL type that is only readable
+/// with a cargo feature the driver was built without.
+#[allow(dead_code)] // unused when every optional feature is enabled
+fn feature_required(pg_ty: &Type, feature: &str) -> Error {
+    Error::unsupported_feature(format!(
+        "reading the PostgreSQL type `{pg_ty}` requires the `{feature}` feature of toasty-driver-postgresql"
+    ))
+}
+
+/// The scalar type a raw query's array element of PostgreSQL type `elem_pg_ty`
+/// is inferred as. The decoders of the types not listed ignore it.
+fn infer_array_element_ty(elem_pg_ty: &Type) -> stmt::Type {
+    if elem_pg_ty == &Type::INT2 {
+        stmt::Type::I16
+    } else if elem_pg_ty == &Type::INT4 {
+        stmt::Type::I32
+    } else if elem_pg_ty == &Type::INT8 {
+        stmt::Type::I64
+    } else if elem_pg_ty == &Type::FLOAT4 {
+        stmt::Type::F32
+    } else if elem_pg_ty == &Type::FLOAT8 {
+        stmt::Type::F64
+    } else if elem_pg_ty == &Type::UUID {
+        stmt::Type::Uuid
+    } else if elem_pg_ty == &Type::BYTEA {
+        stmt::Type::Bytes
+    } else {
+        stmt::Type::String
     }
 }
 
@@ -406,67 +484,91 @@ impl Value {
 // decode through the same logic.
 // ============================================================================
 
-fn text_to_value(v: String, expected_ty: &stmt::Type) -> stmt::Value {
-    match expected_ty {
+fn text_to_value(v: String, expected_ty: &stmt::Type) -> Result<stmt::Value> {
+    Ok(match expected_ty {
         stmt::Type::String => stmt::Value::String(v),
-        stmt::Type::Uuid => stmt::Value::Uuid(
-            v.parse()
-                .unwrap_or_else(|_| panic!("uuid could not be parsed from text")),
-        ),
+        stmt::Type::Uuid => match v.parse() {
+            Ok(uuid) => stmt::Value::Uuid(uuid),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::String(v), "Uuid")),
+        },
         _ => stmt::Value::String(v),
-    }
+    })
 }
 
-fn int2_to_value(v: i16, expected_ty: &stmt::Type) -> stmt::Value {
-    match expected_ty {
-        stmt::Type::I8 => stmt::Value::I8(v as i8),
+fn bytea_to_value(v: Vec<u8>, column: &Column, expected_ty: &stmt::Type) -> Result<stmt::Value> {
+    Ok(match expected_ty {
+        stmt::Type::Uuid => match uuid::Uuid::from_slice(&v) {
+            Ok(uuid) => stmt::Value::Uuid(uuid),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::Bytes(v), "Uuid")),
+        },
+        stmt::Type::Bytes => stmt::Value::Bytes(v),
+        _ => return Err(mismatch(column, expected_ty)),
+    })
+}
+
+fn int2_to_value(v: i16, column: &Column, expected_ty: &stmt::Type) -> Result<stmt::Value> {
+    Ok(match expected_ty {
+        stmt::Type::I8 => match i8::try_from(v) {
+            Ok(v) => stmt::Value::I8(v),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::I16(v), "i8")),
+        },
         stmt::Type::I16 => stmt::Value::I16(v),
-        stmt::Type::U8 => stmt::Value::U8(
-            u8::try_from(v).unwrap_or_else(|_| panic!("u8 value out of range: {v}")),
-        ),
-        stmt::Type::U16 => stmt::Value::U16(v as u16),
-        _ => panic!("unexpected type for INT2: {expected_ty:#?}"),
-    }
+        stmt::Type::U8 => match u8::try_from(v) {
+            Ok(v) => stmt::Value::U8(v),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::I16(v), "u8")),
+        },
+        stmt::Type::U16 => match u16::try_from(v) {
+            Ok(v) => stmt::Value::U16(v),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::I16(v), "u16")),
+        },
+        _ => return Err(mismatch(column, expected_ty)),
+    })
 }
 
-fn int4_to_value(v: i32, expected_ty: &stmt::Type) -> stmt::Value {
-    match expected_ty {
+fn int4_to_value(v: i32, expected_ty: &stmt::Type) -> Result<stmt::Value> {
+    Ok(match expected_ty {
         stmt::Type::I32 => stmt::Value::I32(v),
-        stmt::Type::U16 => stmt::Value::U16(
-            u16::try_from(v).unwrap_or_else(|_| panic!("u16 value out of range: {v}")),
-        ),
-        stmt::Type::U32 => stmt::Value::U32(v as u32),
+        stmt::Type::U16 => match u16::try_from(v) {
+            Ok(v) => stmt::Value::U16(v),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::I32(v), "u16")),
+        },
+        stmt::Type::U32 => match u32::try_from(v) {
+            Ok(v) => stmt::Value::U32(v),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::I32(v), "u32")),
+        },
         _ => stmt::Value::I32(v),
-    }
+    })
 }
 
-fn int8_to_value(v: i64, expected_ty: &stmt::Type) -> stmt::Value {
-    match expected_ty {
+fn int8_to_value(v: i64, expected_ty: &stmt::Type) -> Result<stmt::Value> {
+    Ok(match expected_ty {
         stmt::Type::I64 => stmt::Value::I64(v),
-        stmt::Type::U32 => stmt::Value::U32(
-            u32::try_from(v).unwrap_or_else(|_| panic!("u32 value out of range: {v}")),
-        ),
-        stmt::Type::U64 => stmt::Value::U64(
-            u64::try_from(v).unwrap_or_else(|_| panic!("u64 value out of range: {v}")),
-        ),
+        stmt::Type::U32 => match u32::try_from(v) {
+            Ok(v) => stmt::Value::U32(v),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::I64(v), "u32")),
+        },
+        stmt::Type::U64 => match u64::try_from(v) {
+            Ok(v) => stmt::Value::U64(v),
+            Err(_) => return Err(Error::type_conversion(stmt::Value::I64(v), "u64")),
+        },
         _ => stmt::Value::I64(v),
-    }
+    })
 }
 
-fn float4_to_value(v: f32, expected_ty: &stmt::Type) -> stmt::Value {
-    match expected_ty {
+fn float4_to_value(v: f32, column: &Column, expected_ty: &stmt::Type) -> Result<stmt::Value> {
+    Ok(match expected_ty {
         stmt::Type::F32 => stmt::Value::F32(v),
         stmt::Type::F64 => stmt::Value::F64(v as f64),
-        _ => panic!("unexpected type for FLOAT4: {expected_ty:#?}"),
-    }
+        _ => return Err(mismatch(column, expected_ty)),
+    })
 }
 
-fn float8_to_value(v: f64, expected_ty: &stmt::Type) -> stmt::Value {
-    match expected_ty {
+fn float8_to_value(v: f64, column: &Column, expected_ty: &stmt::Type) -> Result<stmt::Value> {
+    Ok(match expected_ty {
         stmt::Type::F32 => stmt::Value::F32(v as f32),
         stmt::Type::F64 => stmt::Value::F64(v),
-        _ => panic!("unexpected type for FLOAT8: {expected_ty:#?}"),
-    }
+        _ => return Err(mismatch(column, expected_ty)),
+    })
 }
 
 /// Decode a PostgreSQL array column into a list of Toasty values. Returns
@@ -478,28 +580,27 @@ fn read_array_items(
     index: usize,
     row: &Row,
     column: &Column,
+    elem_pg_ty: &Type,
     elem_ty: &stmt::Type,
-) -> Option<Vec<stmt::Value>> {
-    let elem_pg_ty = match column.type_().kind() {
-        Kind::Array(elem) => elem,
-        _ => panic!(
-            "read_array_items called on non-array column: {:?}",
-            column.type_()
-        ),
+) -> Result<Option<Vec<stmt::Value>>> {
+    let Some(RawBytes(raw)) = get_opt::<RawBytes<'_>>(row, index, column)? else {
+        return Ok(None);
     };
-
-    let RawBytes(raw) = row.get::<usize, Option<RawBytes<'_>>>(index)?;
-    let array = array_from_sql(raw).expect("invalid PostgreSQL array wire format");
+    let array = array_from_sql(raw)
+        .map_err(|e| read_error(column, format!("invalid array wire format: {e}")))?;
 
     let ndims = array
         .dimensions()
         .count()
-        .expect("invalid PostgreSQL array dimensions header");
+        .map_err(|e| read_error(column, format!("invalid array dimensions header: {e}")))?;
     if ndims > 1 {
-        panic!(
-            "multi-dimensional PostgreSQL arrays are not supported \
-             (got {ndims} dimensions). See https://github.com/tokio-rs/toasty/issues/870"
-        );
+        return Err(read_error(
+            column,
+            format!(
+                "multi-dimensional arrays are not supported (got {ndims} dimensions). \
+                 See https://github.com/tokio-rs/toasty/issues/870"
+            ),
+        ));
     }
 
     let mut values = array.values();
@@ -507,163 +608,159 @@ fn read_array_items(
     let mut out = Vec::with_capacity(cap);
     while let Some(elem) = values
         .next()
-        .expect("invalid PostgreSQL array element framing")
+        .map_err(|e| read_error(column, format!("invalid array element framing: {e}")))?
     {
         out.push(match elem {
             None => stmt::Value::Null,
-            Some(bytes) => decode_array_element(elem_pg_ty, bytes, elem_ty),
+            Some(bytes) => decode_array_element(column, elem_pg_ty, bytes, elem_ty)?,
         });
     }
-    Some(out)
+    Ok(Some(out))
+}
+
+/// Decodes a value of PostgreSQL type `T` from the wire bytes of an array
+/// element of `column`.
+fn decode_element<'a, T: FromSql<'a>>(
+    column: &Column,
+    elem_pg_ty: &Type,
+    bytes: &'a [u8],
+) -> Result<T> {
+    T::from_sql(elem_pg_ty, bytes)
+        .map_err(|e| read_error(column, format!("invalid `{elem_pg_ty}` array element: {e}")))
 }
 
 /// Decode a single PostgreSQL array element from its raw wire bytes and
 /// project it into the Toasty value space using `elem_ty`. Reuses the
 /// scalar-column `_to_value` helpers so a `text[]` element and a `text`
 /// column decode through identical logic.
-fn decode_array_element(elem_pg_ty: &Type, bytes: &[u8], elem_ty: &stmt::Type) -> stmt::Value {
-    if elem_pg_ty == &Type::TEXT || elem_pg_ty == &Type::VARCHAR {
-        text_to_value(
-            String::from_sql(elem_pg_ty, bytes).expect("decode TEXT array element"),
-            elem_ty,
-        )
-    } else if elem_pg_ty == &Type::BOOL {
-        stmt::Value::Bool(bool::from_sql(elem_pg_ty, bytes).expect("decode BOOL array element"))
-    } else if elem_pg_ty == &Type::INT2 {
-        int2_to_value(
-            i16::from_sql(elem_pg_ty, bytes).expect("decode INT2 array element"),
-            elem_ty,
-        )
-    } else if elem_pg_ty == &Type::INT4 {
-        int4_to_value(
-            i32::from_sql(elem_pg_ty, bytes).expect("decode INT4 array element"),
-            elem_ty,
-        )
-    } else if elem_pg_ty == &Type::INT8 {
-        int8_to_value(
-            i64::from_sql(elem_pg_ty, bytes).expect("decode INT8 array element"),
-            elem_ty,
-        )
-    } else if elem_pg_ty == &Type::FLOAT4 {
-        float4_to_value(
-            f32::from_sql(elem_pg_ty, bytes).expect("decode FLOAT4 array element"),
-            elem_ty,
-        )
-    } else if elem_pg_ty == &Type::FLOAT8 {
-        float8_to_value(
-            f64::from_sql(elem_pg_ty, bytes).expect("decode FLOAT8 array element"),
-            elem_ty,
-        )
-    } else if elem_pg_ty == &Type::NUMERIC {
-        #[cfg(feature = "rust_decimal")]
-        {
-            stmt::Value::Decimal(
-                rust_decimal::Decimal::from_sql(elem_pg_ty, bytes)
-                    .expect("decode NUMERIC array element"),
-            )
-        }
-        #[cfg(not(feature = "rust_decimal"))]
-        {
-            panic!("NUMERIC array elements require rust_decimal feature to be enabled")
-        }
-    } else if elem_pg_ty == &Type::UUID {
-        stmt::Value::Uuid(
-            uuid::Uuid::from_sql(elem_pg_ty, bytes).expect("decode UUID array element"),
-        )
-    } else if elem_pg_ty == &Type::TIMESTAMPTZ {
-        #[cfg(feature = "jiff")]
-        {
-            stmt::Value::Timestamp(
-                jiff::Timestamp::from_sql(elem_pg_ty, bytes)
-                    .expect("decode TIMESTAMPTZ array element"),
-            )
-        }
-        #[cfg(not(feature = "jiff"))]
-        {
-            panic!("TIMESTAMPTZ requires jiff feature to be enabled")
-        }
-    } else if elem_pg_ty == &Type::TIMESTAMP {
-        #[cfg(feature = "jiff")]
-        {
-            stmt::Value::DateTime(
-                jiff::civil::DateTime::from_sql(elem_pg_ty, bytes)
-                    .expect("decode TIMESTAMP array element"),
-            )
-        }
-        #[cfg(not(feature = "jiff"))]
-        {
-            panic!("TIMESTAMP requires jiff feature to be enabled")
-        }
-    } else if elem_pg_ty == &Type::DATE {
-        #[cfg(feature = "jiff")]
-        {
-            stmt::Value::Date(
-                jiff::civil::Date::from_sql(elem_pg_ty, bytes).expect("decode DATE array element"),
-            )
-        }
-        #[cfg(not(feature = "jiff"))]
-        {
-            panic!("DATE requires jiff feature to be enabled")
-        }
-    } else if elem_pg_ty == &Type::TIME {
-        #[cfg(feature = "jiff")]
-        {
-            stmt::Value::Time(
-                jiff::civil::Time::from_sql(elem_pg_ty, bytes).expect("decode TIME array element"),
-            )
-        }
-        #[cfg(not(feature = "jiff"))]
-        {
-            panic!("TIME requires jiff feature to be enabled")
-        }
-    } else if elem_pg_ty == &Type::CIDR {
-        #[cfg(feature = "net")]
-        {
-            stmt::Value::Cidr(decode_cidr(bytes))
-        }
-        #[cfg(not(feature = "net"))]
-        {
-            panic!("CIDR requires net feature to be enabled")
-        }
-    } else if elem_pg_ty == &Type::INET {
-        #[cfg(feature = "net")]
-        {
-            stmt::Value::Inet(decode_inet(bytes))
-        }
-        #[cfg(not(feature = "net"))]
-        {
-            panic!("INET requires net feature to be enabled")
-        }
-    } else if elem_pg_ty == &Type::MACADDR {
-        #[cfg(feature = "net")]
-        {
-            stmt::Value::MacAddr(decode_macaddr(bytes))
-        }
-        #[cfg(not(feature = "net"))]
-        {
-            panic!("MACADDR requires net feature to be enabled")
-        }
-    } else if elem_pg_ty == &Type::MACADDR8 {
-        #[cfg(feature = "net")]
-        {
-            stmt::Value::MacAddr8(decode_macaddr8(bytes))
-        }
-        #[cfg(not(feature = "net"))]
-        {
-            panic!("MACADDR8 requires net feature to be enabled")
-        }
-    } else if matches!(elem_pg_ty.kind(), Kind::Enum(_)) {
-        // Enum labels are plain UTF-8; `EnumString` accepts `Kind::Enum` where
-        // `String` won't.
-        let EnumString(v) =
-            EnumString::from_sql(elem_pg_ty, bytes).expect("decode ENUM array element");
-        text_to_value(v, elem_ty)
-    } else {
-        todo!(
-            "implement PostgreSQL array decoding for element type `{:#?}`",
-            elem_pg_ty
-        )
-    }
+fn decode_array_element(
+    column: &Column,
+    elem_pg_ty: &Type,
+    bytes: &[u8],
+    elem_ty: &stmt::Type,
+) -> Result<stmt::Value> {
+    Ok(
+        if elem_pg_ty == &Type::TEXT || elem_pg_ty == &Type::VARCHAR {
+            text_to_value(decode_element(column, elem_pg_ty, bytes)?, elem_ty)?
+        } else if elem_pg_ty == &Type::BOOL {
+            stmt::Value::Bool(decode_element(column, elem_pg_ty, bytes)?)
+        } else if elem_pg_ty == &Type::INT2 {
+            int2_to_value(decode_element(column, elem_pg_ty, bytes)?, column, elem_ty)?
+        } else if elem_pg_ty == &Type::INT4 {
+            int4_to_value(decode_element(column, elem_pg_ty, bytes)?, elem_ty)?
+        } else if elem_pg_ty == &Type::INT8 {
+            int8_to_value(decode_element(column, elem_pg_ty, bytes)?, elem_ty)?
+        } else if elem_pg_ty == &Type::FLOAT4 {
+            float4_to_value(decode_element(column, elem_pg_ty, bytes)?, column, elem_ty)?
+        } else if elem_pg_ty == &Type::FLOAT8 {
+            float8_to_value(decode_element(column, elem_pg_ty, bytes)?, column, elem_ty)?
+        } else if elem_pg_ty == &Type::BYTEA {
+            bytea_to_value(decode_element(column, elem_pg_ty, bytes)?, column, elem_ty)?
+        } else if elem_pg_ty == &Type::NUMERIC {
+            #[cfg(feature = "rust_decimal")]
+            {
+                stmt::Value::Decimal(decode_element::<rust_decimal::Decimal>(
+                    column, elem_pg_ty, bytes,
+                )?)
+            }
+            #[cfg(not(feature = "rust_decimal"))]
+            {
+                return Err(feature_required(elem_pg_ty, "rust_decimal"));
+            }
+        } else if elem_pg_ty == &Type::UUID {
+            stmt::Value::Uuid(decode_element(column, elem_pg_ty, bytes)?)
+        } else if elem_pg_ty == &Type::TIMESTAMPTZ {
+            #[cfg(feature = "jiff")]
+            {
+                stmt::Value::Timestamp(decode_element::<jiff::Timestamp>(
+                    column, elem_pg_ty, bytes,
+                )?)
+            }
+            #[cfg(not(feature = "jiff"))]
+            {
+                return Err(feature_required(elem_pg_ty, "jiff"));
+            }
+        } else if elem_pg_ty == &Type::TIMESTAMP {
+            #[cfg(feature = "jiff")]
+            {
+                stmt::Value::DateTime(decode_element::<jiff::civil::DateTime>(
+                    column, elem_pg_ty, bytes,
+                )?)
+            }
+            #[cfg(not(feature = "jiff"))]
+            {
+                return Err(feature_required(elem_pg_ty, "jiff"));
+            }
+        } else if elem_pg_ty == &Type::DATE {
+            #[cfg(feature = "jiff")]
+            {
+                stmt::Value::Date(decode_element::<jiff::civil::Date>(
+                    column, elem_pg_ty, bytes,
+                )?)
+            }
+            #[cfg(not(feature = "jiff"))]
+            {
+                return Err(feature_required(elem_pg_ty, "jiff"));
+            }
+        } else if elem_pg_ty == &Type::TIME {
+            #[cfg(feature = "jiff")]
+            {
+                stmt::Value::Time(decode_element::<jiff::civil::Time>(
+                    column, elem_pg_ty, bytes,
+                )?)
+            }
+            #[cfg(not(feature = "jiff"))]
+            {
+                return Err(feature_required(elem_pg_ty, "jiff"));
+            }
+        } else if elem_pg_ty == &Type::CIDR {
+            #[cfg(feature = "net")]
+            {
+                stmt::Value::Cidr(decode_cidr(bytes, column)?)
+            }
+            #[cfg(not(feature = "net"))]
+            {
+                return Err(feature_required(elem_pg_ty, "net"));
+            }
+        } else if elem_pg_ty == &Type::INET {
+            #[cfg(feature = "net")]
+            {
+                stmt::Value::Inet(decode_inet(bytes, column)?)
+            }
+            #[cfg(not(feature = "net"))]
+            {
+                return Err(feature_required(elem_pg_ty, "net"));
+            }
+        } else if elem_pg_ty == &Type::MACADDR {
+            #[cfg(feature = "net")]
+            {
+                stmt::Value::MacAddr(decode_macaddr(bytes, column)?)
+            }
+            #[cfg(not(feature = "net"))]
+            {
+                return Err(feature_required(elem_pg_ty, "net"));
+            }
+        } else if elem_pg_ty == &Type::MACADDR8 {
+            #[cfg(feature = "net")]
+            {
+                stmt::Value::MacAddr8(decode_macaddr8(bytes, column)?)
+            }
+            #[cfg(not(feature = "net"))]
+            {
+                return Err(feature_required(elem_pg_ty, "net"));
+            }
+        } else if matches!(elem_pg_ty.kind(), Kind::Enum(_)) {
+            // Enum labels are plain UTF-8; `EnumString` accepts `Kind::Enum` where
+            // `String` won't.
+            let EnumString(v) = decode_element(column, elem_pg_ty, bytes)?;
+            text_to_value(v, elem_ty)?
+        } else {
+            return Err(Error::unsupported_feature(format!(
+                "the PostgreSQL driver cannot read array elements of type `{elem_pg_ty}` (column `{}`)",
+                column.name()
+            )));
+        },
+    )
 }
 
 impl ToSql for Value {
@@ -725,7 +822,13 @@ fn value_to_sql(
         (stmt::Value::I16(value), &Type::INT8) => (*value as i64).to_sql(ty, out),
         (stmt::Value::I32(value), &Type::INT4) => value.to_sql(ty, out),
         (stmt::Value::I32(value), &Type::INT8) => (*value as i64).to_sql(ty, out),
-        (stmt::Value::I64(value), &Type::INT4) => (*value as i32).to_sql(ty, out),
+        (stmt::Value::I64(value), &Type::INT4) => match i32::try_from(*value) {
+            Ok(value) => value.to_sql(ty, out),
+            Err(_) => Err(format!(
+                "i64 value {value} is out of range for the PostgreSQL type `{ty}`"
+            )
+            .into()),
+        },
         (stmt::Value::I64(value), &Type::INT8) => value.to_sql(ty, out),
         (stmt::Value::U8(value), &Type::INT2) => (*value as i16).to_sql(ty, out),
         (stmt::Value::U8(value), &Type::INT4) => (*value as i32).to_sql(ty, out),
@@ -845,33 +948,74 @@ fn value_to_sql(
             )?;
             Ok(IsNull::No)
         }
-        (value, _) => todo!("unsupported Value for PostgreSQL type: {value:#?}, type: {ty:#?}"),
+        (value, _) => Err(format!(
+            "cannot bind {:?} as the PostgreSQL type `{ty}`",
+            value.infer_ty()
+        )
+        .into()),
     }
 }
 
 #[cfg(feature = "net")]
-fn decode_cidr(raw: &[u8]) -> IpCidr {
-    let value = inet_from_sql(raw).expect("decode PostgreSQL CIDR");
-    IpCidr::new(value.addr(), value.netmask()).expect("PostgreSQL returned invalid CIDR")
+fn decode_cidr(raw: &[u8], column: &Column) -> Result<IpCidr> {
+    let value = inet_from_sql(raw).map_err(|e| read_error(column, e))?;
+    IpCidr::new(value.addr(), value.netmask()).map_err(|e| read_error(column, e))
 }
 
 #[cfg(feature = "net")]
-fn decode_inet(raw: &[u8]) -> IpInet {
-    let value = inet_from_sql(raw).expect("decode PostgreSQL INET");
-    IpInet::new(value.addr(), value.netmask()).expect("PostgreSQL returned invalid INET")
+fn decode_inet(raw: &[u8], column: &Column) -> Result<IpInet> {
+    let value = inet_from_sql(raw).map_err(|e| read_error(column, e))?;
+    IpInet::new(value.addr(), value.netmask()).map_err(|e| read_error(column, e))
 }
 
 #[cfg(feature = "net")]
-fn decode_macaddr(raw: &[u8]) -> MacAddr6 {
+fn decode_macaddr(raw: &[u8], column: &Column) -> Result<MacAddr6> {
     macaddr_from_sql(raw)
         .map(MacAddr6::from)
-        .expect("decode PostgreSQL MACADDR")
+        .map_err(|e| read_error(column, e))
 }
 
 #[cfg(feature = "net")]
-fn decode_macaddr8(raw: &[u8]) -> MacAddr8 {
+fn decode_macaddr8(raw: &[u8], column: &Column) -> Result<MacAddr8> {
     let bytes: [u8; 8] = raw
         .try_into()
-        .expect("invalid PostgreSQL MACADDR8 wire length");
-    MacAddr8::from(bytes)
+        .map_err(|_| read_error(column, "invalid MACADDR8 wire length"))?;
+    Ok(MacAddr8::from(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bind(value: stmt::Value, ty: &Type) -> std::result::Result<(), String> {
+        value_to_sql(&value, ty, &mut BytesMut::new())
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn i64_binds_to_int4_when_it_fits() {
+        assert!(bind(stmt::Value::I64(-7), &Type::INT4).is_ok());
+        assert!(bind(stmt::Value::I64(i32::MAX as i64), &Type::INT4).is_ok());
+    }
+
+    #[test]
+    fn i64_out_of_range_for_int4_is_an_error() {
+        let err = bind(stmt::Value::I64(i32::MAX as i64 + 1), &Type::INT4).unwrap_err();
+        assert!(err.contains("2147483648"), "{err}");
+        assert!(err.contains("int4"), "{err}");
+        assert!(bind(stmt::Value::I64(i64::MIN), &Type::INT4).is_err());
+    }
+
+    #[test]
+    fn u64_out_of_range_for_int8_is_an_error() {
+        assert!(bind(stmt::Value::U64(i64::MAX as u64), &Type::INT8).is_ok());
+        assert!(bind(stmt::Value::U64(i64::MAX as u64 + 1), &Type::INT8).is_err());
+    }
+
+    #[test]
+    fn out_of_range_list_element_is_an_error() {
+        let list = stmt::Value::List(vec![stmt::Value::I64(1), stmt::Value::I64(i64::MAX)]);
+        assert!(bind(list, &Type::INT4_ARRAY).is_err());
+    }
 }
