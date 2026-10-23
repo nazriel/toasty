@@ -84,7 +84,7 @@ pub async fn partial_unique_index_constrains_only_the_rows_its_filter_admits(
 #[driver_test(requires(partial_index))]
 pub async fn partial_index_leaves_queries_on_its_fields_unchanged(t: &mut Test) -> Result<()> {
     #[derive(Debug, toasty::Model)]
-    #[index(name, filter = "archived = 0")]
+    #[index(name, filter = "archived = false")]
     struct Post {
         #[key]
         #[auto]
