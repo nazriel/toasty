@@ -1,4 +1,4 @@
-use super::{ColumnAlias, Comma, Delimited, Ident, ToSql};
+use super::{ColumnAlias, Comma, Delimited, Ident, QualifiedIdent, ToSql};
 
 use crate::{
     serializer::Dialect,
@@ -62,8 +62,10 @@ impl ToSql for &stmt::CreateIndex {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
         let index = f.serializer.index(self.index);
         let table = f.serializer.table(self.on);
+        // The index is created in its table's schema, so its own name is
+        // never qualified.
         let index_name = Ident(&index.name);
-        let table_name = Ident(&table.name);
+        let table_name = QualifiedIdent::table(table);
         let columns = Comma(&self.columns);
         let unique = if self.unique { "UNIQUE " } else { "" };
 
@@ -90,7 +92,7 @@ impl ToSql for &stmt::CreateIndex {
 impl ToSql for &stmt::AddColumn {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
         let table = f.serializer.table(self.table);
-        let table_name = Ident(&table.name);
+        let table_name = QualifiedIdent::table(table);
 
         // Create new expression scope to serialize the statement
         let mut f = f.scope(table);
@@ -104,7 +106,7 @@ impl ToSql for &stmt::AddColumn {
 impl ToSql for &stmt::AlterColumn {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
         let table = f.serializer.table(self.id.table);
-        let table_name = Ident(&table.name);
+        let table_name = QualifiedIdent::table(table);
 
         // Create new expression scope to serialize the statement
         let mut f = f.scope(table);
@@ -221,12 +223,14 @@ impl ToSql for &stmt::AlterColumn {
 /// its textual label. See <https://wiki.postgresql.org/wiki/Mass_type_replacement>.
 fn enum_change_intermediate_ty(previous: &db::Type, next: &db::Type) -> Option<&'static str> {
     match (previous, next) {
-        (db::Type::Enum(previous), db::Type::Enum(next)) if previous.name != next.name => {
+        (db::Type::Enum(previous), db::Type::Enum(next)) if is_other_enum(previous, next) => {
             Some("TEXT")
         }
         (db::Type::List(previous), db::Type::List(next)) => {
             match (previous.as_ref(), next.as_ref()) {
-                (db::Type::Enum(previous), db::Type::Enum(next)) if previous.name != next.name => {
+                (db::Type::Enum(previous), db::Type::Enum(next))
+                    if is_other_enum(previous, next) =>
+                {
                     Some("TEXT[]")
                 }
                 _ => None,
@@ -234,6 +238,12 @@ fn enum_change_intermediate_ty(previous: &db::Type, next: &db::Type) -> Option<&
         }
         _ => None,
     }
+}
+
+/// Whether two named enum types are distinct types: a type is identified by
+/// its schema and its name together.
+fn is_other_enum(previous: &db::TypeEnum, next: &db::TypeEnum) -> bool {
+    previous.schema != next.schema || previous.name != next.name
 }
 
 impl ToSql for &stmt::AlterTable {
@@ -257,7 +267,7 @@ impl ToSql for &stmt::CopyTable {
 impl ToSql for &stmt::CreateTable {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
         let table = f.serializer.table(self.table);
-        let name = Ident(&table.name);
+        let name = QualifiedIdent::table(table);
         let columns = ColumnsWithConstraints(self);
 
         // Create new expression scope to serialize the statement
@@ -273,12 +283,7 @@ impl ToSql for &stmt::CreateType {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
         use toasty_core::stmt::Value;
 
-        let name = self
-            .ty
-            .name
-            .as_deref()
-            .expect("CREATE TYPE requires a type name");
-        let name = Ident(name);
+        let name = QualifiedIdent::type_enum(&self.ty);
 
         fmt!(f, "CREATE TYPE " name " AS ENUM (");
         for (i, variant) in self.ty.variants.iter().enumerate() {
@@ -295,7 +300,7 @@ impl ToSql for &stmt::AlterType {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
         use toasty_core::stmt::Value;
 
-        let name = Ident(&self.type_name);
+        let name = &self.type_name;
 
         fmt!(f, "ALTER TYPE " name " ADD VALUE ");
         Value::String(self.variant.name.clone()).to_sql(f);
@@ -304,10 +309,9 @@ impl ToSql for &stmt::AlterType {
 
 impl ToSql for &stmt::RenameType {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
-        fmt!(
-            f,
-            "ALTER TYPE " Ident(&self.type_name) " RENAME TO " Ident(&self.new_name)
-        );
+        let name = &self.type_name;
+
+        fmt!(f, "ALTER TYPE " name " RENAME TO " Ident(&self.new_name));
     }
 }
 
@@ -368,7 +372,7 @@ impl ToSql for &stmt::Direction {
 impl ToSql for &stmt::DropColumn {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
         let table = f.serializer.table(self.table);
-        let table_name = Ident(&table.name);
+        let table_name = QualifiedIdent::table(table);
         let if_exists = if self.if_exists { "IF EXISTS " } else { "" };
 
         // Create new expression scope to serialize the statement

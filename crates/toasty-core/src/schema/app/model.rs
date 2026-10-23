@@ -157,6 +157,10 @@ pub struct ModelRoot {
     /// uses the explicit `#[table = "..."]` override.
     pub table_name: String,
 
+    /// The database schema the table lives in, from `#[table(schema = "...")]`.
+    /// `None` for a table found through the connection's default schema.
+    pub table_schema: Option<String>,
+
     /// Secondary indices defined on this model.
     pub indices: Vec<Index>,
 

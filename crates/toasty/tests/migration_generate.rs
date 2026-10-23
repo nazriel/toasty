@@ -26,6 +26,7 @@ fn users_schema() -> db::Schema {
     db::Schema {
         tables: vec![db::Table {
             id: table_id,
+            schema: None,
             name: "users".to_string(),
             columns: vec![db::Column {
                 id,

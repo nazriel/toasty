@@ -1,4 +1,4 @@
-use hashbrown::{HashMap, HashSet};
+use hashbrown::{Equivalent, HashMap, HashSet};
 
 use toasty_core::{Error, Result, schema::db};
 use tokio_postgres::{
@@ -12,14 +12,48 @@ use crate::r#type::{array_type_of, to_postgres_type};
 /// (e.g. `status`) and its array form (`_status`). Array OIDs are needed
 /// when binding `Value::List` of enum values for `= ANY($1)`.
 ///
+/// A type is cached under its schema and its name: `inventory.status` and an
+/// unqualified `status` are two entries.
+///
 /// Call [`preload`](Self::preload) with all types a statement will use, then
 /// [`get`](Self::get) synchronously for each parameter.
 #[derive(Debug, Default)]
 pub struct OidCache {
-    /// Base enum type, indexed by typname.
-    enum_types: HashMap<String, Type>,
-    /// Array-of-enum type, indexed by the base enum's typname.
-    enum_array_types: HashMap<String, Type>,
+    /// Base enum type, indexed by the schema and name the model gives it.
+    enum_types: HashMap<TypeKey, Type>,
+    /// Array-of-enum type, indexed by the base enum's schema and name.
+    enum_array_types: HashMap<TypeKey, Type>,
+}
+
+/// A named enum type as the model names it: its schema, when it has one, and
+/// its name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct TypeKey {
+    schema: Option<String>,
+    name: String,
+}
+
+/// A borrowed [`TypeKey`], for lookups without allocating. Its fields hash
+/// exactly as `TypeKey`'s do.
+#[derive(Hash)]
+struct TypeKeyRef<'a> {
+    schema: Option<&'a str>,
+    name: &'a str,
+}
+
+impl Equivalent<TypeKey> for TypeKeyRef<'_> {
+    fn equivalent(&self, key: &TypeKey) -> bool {
+        self.schema == key.schema.as_deref() && self.name == key.name
+    }
+}
+
+impl TypeKey {
+    fn as_ref(&self) -> TypeKeyRef<'_> {
+        TypeKeyRef {
+            schema: self.schema.as_deref(),
+            name: &self.name,
+        }
+    }
 }
 
 impl OidCache {
@@ -35,13 +69,13 @@ impl OidCache {
         client: &Client,
         types: impl IntoIterator<Item = &'a db::Type>,
     ) -> Result<()> {
-        let mut names = HashSet::new();
+        let mut keys = HashSet::new();
         for ty in types {
-            collect_enum_names(ty, &mut names);
+            collect_enum_keys(ty, &mut keys);
         }
-        let mut uncached: Vec<String> = names
+        let mut uncached: Vec<TypeKey> = keys
             .into_iter()
-            .filter(|name| !self.enum_types.contains_key(name))
+            .filter(|key| !self.enum_types.contains_key(key))
             .collect();
         // Sorted so the type reported as missing is the same on every run.
         uncached.sort();
@@ -50,6 +84,9 @@ impl OidCache {
             return Ok(());
         }
 
+        let schemas: Vec<Option<&str>> = uncached.iter().map(|key| key.schema.as_deref()).collect();
+        let names: Vec<&str> = uncached.iter().map(|key| key.name.as_str()).collect();
+
         // `typarray` links each base type to its automatically-created
         // array type, and `pg_enum` gives us the variant labels. Fetching
         // all three in one query keeps preload to a single round-trip and
@@ -57,52 +94,60 @@ impl OidCache {
         // would build itself — so future `Type` equality / `Kind` checks
         // can't trip over an empty variant list.
         //
-        // `to_regtype` resolves each name through the session's
-        // `search_path`, exactly as an unqualified name in a statement
-        // would. Matching `pg_type.typname` directly would also match
-        // same-named enums in schemas outside the search path — under
-        // schema-per-tenant setups the cache could then bind the wrong
-        // schema's OID.
+        // An unqualified name resolves through the session's `search_path`
+        // (`to_regtype(quote_ident(name))`), exactly as an unqualified name
+        // in a statement would. Matching `pg_type.typname` directly would
+        // also match same-named enums in schemas outside the search path —
+        // under schema-per-tenant setups the cache could then bind the wrong
+        // schema's OID. A schema-qualified name resolves in its own schema
+        // only, whether or not that schema is on the search path.
         let rows = client
             .query(
-                "SELECT t.typname, t.oid, t.typarray, n.nspname, \
+                "SELECT k.schema, k.name, t.typname, t.oid, t.typarray, n.nspname, \
                         array_agg(e.enumlabel ORDER BY e.enumsortorder) \
-                 FROM unnest($1::text[]) AS name \
-                 JOIN pg_type t ON t.oid = to_regtype(quote_ident(name))::oid \
+                 FROM unnest($1::text[], $2::text[]) AS k(schema, name) \
+                 JOIN pg_type t ON t.oid = to_regtype(CASE \
+                     WHEN k.schema IS NULL THEN quote_ident(k.name) \
+                     ELSE format('%I.%I', k.schema, k.name) \
+                 END)::oid \
                  JOIN pg_namespace n ON n.oid = t.typnamespace \
                  JOIN pg_enum e ON e.enumtypid = t.oid \
-                 GROUP BY t.typname, t.oid, t.typarray, n.nspname",
-                &[&uncached],
+                 GROUP BY k.schema, k.name, t.typname, t.oid, t.typarray, n.nspname",
+                &[&schemas, &names],
             )
             .await
             .map_err(toasty_core::Error::driver_operation_failed)?;
 
         for row in &rows {
-            let name: String = row.try_get(0).map_err(Error::driver_operation_failed)?;
-            let oid: u32 = row.try_get(1).map_err(Error::driver_operation_failed)?;
-            let array_oid: u32 = row.try_get(2).map_err(Error::driver_operation_failed)?;
-            let schema: String = row.try_get(3).map_err(Error::driver_operation_failed)?;
-            let variants: Vec<String> = row.try_get(4).map_err(Error::driver_operation_failed)?;
+            let key = TypeKey {
+                schema: row.try_get(0).map_err(Error::driver_operation_failed)?,
+                name: row.try_get(1).map_err(Error::driver_operation_failed)?,
+            };
+            let typname: String = row.try_get(2).map_err(Error::driver_operation_failed)?;
+            let oid: u32 = row.try_get(3).map_err(Error::driver_operation_failed)?;
+            let array_oid: u32 = row.try_get(4).map_err(Error::driver_operation_failed)?;
+            let schema: String = row.try_get(5).map_err(Error::driver_operation_failed)?;
+            let variants: Vec<String> = row.try_get(6).map_err(Error::driver_operation_failed)?;
 
-            let enum_type = Type::new(name.clone(), oid, Kind::Enum(variants), schema.clone());
+            let enum_type = Type::new(typname.clone(), oid, Kind::Enum(variants), schema.clone());
             let array_type = Type::new(
-                format!("_{name}"),
+                format!("_{typname}"),
                 array_oid,
                 Kind::Array(enum_type.clone()),
                 schema,
             );
-            self.enum_types.insert(name.clone(), enum_type);
-            self.enum_array_types.insert(name, array_type);
+            self.enum_types.insert(key.clone(), enum_type);
+            self.enum_array_types.insert(key, array_type);
         }
 
         // The query returns a row only for a name that resolves to an enum
-        // type, so a requested name without one is not in the database (or is
-        // not visible through the session's `search_path`).
+        // type, so a requested name without one is not in the database (or,
+        // unqualified, is not visible through the session's `search_path`).
         if let Some(missing) = uncached
             .iter()
-            .find(|name| !self.enum_types.contains_key(*name))
+            .find(|key| !self.enum_types.contains_key(*key))
         {
-            return Err(missing_enum_type(missing));
+            return Err(missing_enum_type(missing.as_ref()));
         }
 
         Ok(())
@@ -114,41 +159,59 @@ impl OidCache {
     /// preloaded, and with `unsupported_feature` for a type with no mapping.
     pub fn get(&self, ty: &db::Type) -> Result<&Type> {
         match ty {
-            db::Type::Enum(type_enum) => match &type_enum.name {
-                Some(name) => self
+            db::Type::Enum(type_enum) => match type_key_ref(type_enum) {
+                Some(key) => self
                     .enum_types
-                    .get(name)
-                    .ok_or_else(|| missing_enum_type(name)),
+                    .get(&key)
+                    .ok_or_else(|| missing_enum_type(key)),
                 None => to_postgres_type(ty),
             },
-            db::Type::List(elem) => match elem.as_ref() {
-                db::Type::Enum(db::TypeEnum {
-                    name: Some(name), ..
-                }) => self
-                    .enum_array_types
-                    .get(name)
-                    .ok_or_else(|| missing_enum_type(name)),
-                _ => array_type_of(self.get(elem)?),
-            },
+            db::Type::List(elem) => {
+                let key = match elem.as_ref() {
+                    db::Type::Enum(type_enum) => type_key_ref(type_enum),
+                    _ => None,
+                };
+                match key {
+                    Some(key) => self
+                        .enum_array_types
+                        .get(&key)
+                        .ok_or_else(|| missing_enum_type(key)),
+                    None => array_type_of(self.get(elem)?),
+                }
+            }
             _ => to_postgres_type(ty),
         }
     }
 }
 
-fn missing_enum_type(name: &str) -> Error {
+fn type_key_ref(ty: &db::TypeEnum) -> Option<TypeKeyRef<'_>> {
+    Some(TypeKeyRef {
+        schema: ty.schema.as_deref(),
+        name: ty.name.as_deref()?,
+    })
+}
+
+fn missing_enum_type(key: TypeKeyRef<'_>) -> Error {
+    let name = match key.schema {
+        Some(schema) => format!("{schema}.{}", key.name),
+        None => key.name.to_string(),
+    };
     Error::invalid_schema(format!("enum type `{name}` does not exist in the database"))
 }
 
-/// Walk a `db::Type` and collect every named enum's typname. Recurses into
-/// `List(elem)` so list-of-enum bind params get preloaded.
-fn collect_enum_names(ty: &db::Type, out: &mut HashSet<String>) {
+/// Walk a `db::Type` and collect every named enum's schema and name. Recurses
+/// into `List(elem)` so list-of-enum bind params get preloaded.
+fn collect_enum_keys(ty: &db::Type, out: &mut HashSet<TypeKey>) {
     match ty {
         db::Type::Enum(te) => {
             if let Some(name) = &te.name {
-                out.insert(name.clone());
+                out.insert(TypeKey {
+                    schema: te.schema.clone(),
+                    name: name.clone(),
+                });
             }
         }
-        db::Type::List(elem) => collect_enum_names(elem, out),
+        db::Type::List(elem) => collect_enum_keys(elem, out),
         _ => {}
     }
 }
@@ -209,6 +272,15 @@ mod tests {
 
     fn db_enum(name: &str) -> db::Type {
         db::Type::Enum(db::TypeEnum {
+            schema: None,
+            name: Some(name.to_string()),
+            variants: vec![],
+        })
+    }
+
+    fn db_enum_in(schema: &str, name: &str) -> db::Type {
+        db::Type::Enum(db::TypeEnum {
+            schema: Some(schema.to_string()),
             name: Some(name.to_string()),
             variants: vec![],
         })
@@ -441,5 +513,76 @@ mod tests {
         assert!(err.is_invalid_schema());
 
         drop_enum(&client, &present).await;
+    }
+
+    /// A schema-qualified enum resolves in its own schema, though the schema
+    /// is not on the search path, in the same round-trip as an unqualified
+    /// one; the qualified and the unqualified name are two cache entries.
+    #[tokio::test]
+    async fn preload_resolves_a_qualified_enum_outside_the_search_path() {
+        let Some(client) = try_connect().await else {
+            return;
+        };
+        let schema = enum_name("nsp_qualified");
+        let plain = enum_name("plain");
+        client
+            .simple_query(&format!(
+                "CREATE SCHEMA \"{schema}\"; \
+                 CREATE TYPE \"{schema}\".status AS ENUM ('q1', 'q2')"
+            ))
+            .await
+            .unwrap();
+        create_enum(&client, &plain, &["p1"]).await;
+
+        let mut cache = OidCache::new();
+        let types = [db_enum_in(&schema, "status"), db_enum(&plain)];
+        cache.preload(&client, types.iter()).await.unwrap();
+
+        let qualified = cache.get(&db_enum_in(&schema, "status")).unwrap();
+        assert_eq!(
+            qualified.kind(),
+            &Kind::Enum(vec!["q1".into(), "q2".into()])
+        );
+        assert_eq!(qualified.schema(), schema);
+        let list = db::Type::List(Box::new(db_enum_in(&schema, "status")));
+        assert_eq!(cache.get(&list).unwrap().name(), "_status");
+        assert_eq!(
+            cache.get(&db_enum(&plain)).unwrap().kind(),
+            &Kind::Enum(vec!["p1".into()])
+        );
+        // The unqualified `status` was never preloaded.
+        assert!(
+            cache
+                .get(&db_enum("status"))
+                .unwrap_err()
+                .is_invalid_schema()
+        );
+
+        drop_enum(&client, &plain).await;
+        let _ = client
+            .simple_query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+            .await;
+    }
+
+    /// A schema-qualified enum that is not in the database fails the preload,
+    /// naming the qualified type.
+    #[tokio::test]
+    async fn missing_qualified_enum_type_names_its_schema() {
+        let Some(client) = try_connect().await else {
+            return;
+        };
+        let schema = enum_name("nsp_absent");
+
+        let mut cache = OidCache::new();
+        let err = cache
+            .preload(&client, [&db_enum_in(&schema, "status")])
+            .await
+            .unwrap_err();
+        assert!(err.is_invalid_schema());
+        assert!(
+            err.to_string()
+                .contains(&format!("enum type `{schema}.status` does not exist")),
+            "{err}"
+        );
     }
 }

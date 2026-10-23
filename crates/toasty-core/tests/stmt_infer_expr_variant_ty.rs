@@ -134,6 +134,7 @@ fn schema() -> Schema {
             },
         },
         table_name: "objects".to_string(),
+        table_schema: None,
         indices: vec![],
         version_field: None,
     });

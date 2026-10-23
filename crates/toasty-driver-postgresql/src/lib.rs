@@ -581,11 +581,15 @@ impl toasty_core::driver::Connection for Connection {
         for table in &schema.db.tables {
             for column in &table.columns {
                 if let Some(type_enum) = column.storage_ty.named_enum()
-                    && created_enum_types.insert(type_enum.name.clone())
+                    && created_enum_types.insert((&type_enum.schema, &type_enum.name))
                 {
                     let sql = serializer.serialize(&sql::Statement::create_enum_type(type_enum));
 
-                    tracing::debug!(enum_type = ?type_enum.name, "creating enum type");
+                    tracing::debug!(
+                        enum_schema = ?type_enum.schema,
+                        enum_type = ?type_enum.name,
+                        "creating enum type"
+                    );
                     self.client
                         .execute(&sql, &[])
                         .await
@@ -595,7 +599,7 @@ impl toasty_core::driver::Connection for Connection {
         }
 
         for table in &schema.db.tables {
-            tracing::debug!(table = %table.name, "creating table");
+            tracing::debug!(schema = ?table.schema, table = %table.name, "creating table");
             self.create_table(&schema.db, table).await?;
         }
         Ok(())

@@ -46,6 +46,7 @@ fn build_model(fields: Vec<Field>, version_field: Option<FieldId>) -> Model {
             index: pk_index_id,
         },
         table_name: "things".to_string(),
+        table_schema: None,
         indices: vec![Index {
             id: pk_index_id,
             name: None,

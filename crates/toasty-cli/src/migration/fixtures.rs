@@ -57,6 +57,7 @@ pub(crate) fn table(id: usize, name: &str, columns: &[&str], indices: &[&str]) -
     let primary_key = index(id, 0, &format!("index_{name}_by_id"), 0, true);
     Table {
         id: TableId(id),
+        schema: None,
         name: name.to_string(),
         columns: std::iter::once("id")
             .chain(columns.iter().copied())

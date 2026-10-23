@@ -24,6 +24,7 @@ fn make_table(id: usize, name: &str, num_columns: usize) -> Table {
 
     Table {
         id: TableId(id),
+        schema: None,
         name: name.to_string(),
         columns,
         primary_key: PrimaryKey {
@@ -168,4 +169,62 @@ fn multiple_operations() {
 
     let d = diff::Table::diff(&cx, &from_tables, &to_tables);
     assert_eq!(d.len(), 4);
+}
+
+fn in_schema(schema: &str, table: Table) -> Table {
+    Table {
+        schema: Some(schema.to_string()),
+        ..table
+    }
+}
+
+#[test]
+fn same_name_in_two_schemas_is_two_tables() {
+    let from_tables = vec![
+        in_schema("inventory", make_table(0, "items", 2)),
+        in_schema("audit", make_table(1, "items", 2)),
+    ];
+    let to_tables = from_tables.clone();
+
+    let from_schema = make_schema(from_tables.clone());
+    let to_schema = make_schema(to_tables.clone());
+    let hints = diff::RenameHints::new();
+    let cx = diff::Context::new(&from_schema, &to_schema, &hints);
+
+    let d = diff::Table::diff(&cx, &from_tables, &to_tables);
+    assert_eq!(d.len(), 0);
+}
+
+#[test]
+fn table_in_another_schema_without_hint_is_drop_and_create() {
+    let from_tables = vec![in_schema("inventory", make_table(0, "items", 2))];
+    let to_tables = vec![in_schema("audit", make_table(0, "items", 2))];
+
+    let from_schema = make_schema(from_tables.clone());
+    let to_schema = make_schema(to_tables.clone());
+    let hints = diff::RenameHints::new();
+    let cx = diff::Context::new(&from_schema, &to_schema, &hints);
+
+    let d = diff::Table::diff(&cx, &from_tables, &to_tables);
+    assert_eq!(d.len(), 2);
+    assert!(
+        matches!(d[0], diff::Table::Drop(table) if table.schema.as_deref() == Some("inventory"))
+    );
+    assert!(matches!(d[1], diff::Table::Create(table) if table.schema.as_deref() == Some("audit")));
+}
+
+#[test]
+fn table_in_another_schema_with_hint_is_an_alter() {
+    let from_tables = vec![in_schema("inventory", make_table(0, "items", 2))];
+    let to_tables = vec![in_schema("audit", make_table(0, "items", 2))];
+
+    let from_schema = make_schema(from_tables.clone());
+    let to_schema = make_schema(to_tables.clone());
+    let mut hints = diff::RenameHints::new();
+    hints.add_table_hint(TableId(0), TableId(0));
+    let cx = diff::Context::new(&from_schema, &to_schema, &hints);
+
+    let d = diff::Table::diff(&cx, &from_tables, &to_tables);
+    assert_eq!(d.len(), 1);
+    assert!(matches!(d[0], diff::Table::Alter { .. }));
 }

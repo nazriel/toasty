@@ -10,7 +10,7 @@ use std::fmt;
 /// ```ignore
 /// use toasty_core::schema::db::{Table, TableId};
 ///
-/// let table = Table::new(TableId(0), "users".to_string());
+/// let table = Table::new(TableId(0), None, "users".to_string());
 /// assert_eq!(table.name, "users");
 /// assert!(table.columns.is_empty());
 /// ```
@@ -19,6 +19,17 @@ use std::fmt;
 pub struct Table {
     /// Uniquely identifies a table within the schema.
     pub id: TableId,
+
+    /// The database schema (namespace) the table lives in, when it is not the
+    /// connection's default. Only drivers with
+    /// [`Capability::schema_qualified_names`](crate::driver::Capability::schema_qualified_names)
+    /// accept a table with a schema. A table's identity is the pair
+    /// `(schema, name)`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub schema: Option<String>,
 
     /// Name of the table as it appears in the database.
     pub name: String,
@@ -83,9 +94,10 @@ impl Table {
         &self.columns[*first]
     }
 
-    pub(crate) fn new(id: TableId, name: String) -> Self {
+    pub(crate) fn new(id: TableId, schema: Option<String>, name: String) -> Self {
         Self {
             id,
+            schema,
             name,
             columns: vec![],
             primary_key: PrimaryKey {

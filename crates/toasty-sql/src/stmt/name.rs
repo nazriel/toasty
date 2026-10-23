@@ -16,6 +16,23 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct Name(pub Vec<String>);
 
+impl Name {
+    /// A name qualified by `schema` when it is set (`"schema"."name"`), or the
+    /// single-segment `name` when it is not.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use toasty_sql::stmt::Name;
+    ///
+    /// assert_eq!(Name::qualified(None, "users").0, ["users"]);
+    /// assert_eq!(Name::qualified(Some("audit"), "users").0, ["audit", "users"]);
+    /// ```
+    pub fn qualified(schema: Option<&str>, name: &str) -> Self {
+        Self(schema.into_iter().chain([name]).map(String::from).collect())
+    }
+}
+
 impl From<&str> for Name {
     fn from(value: &str) -> Self {
         Self(vec![value.into()])

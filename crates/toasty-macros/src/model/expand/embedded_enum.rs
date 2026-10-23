@@ -1103,12 +1103,16 @@ impl Expand<'_> {
         match &embedded_enum.storage_strategy {
             Some(EnumStorageStrategy::NativeEnum(custom_name)) => {
                 // Determine the type name: custom name or default snake_case of enum ident.
-                let type_name = match custom_name {
+                let type_name = match &custom_name.name {
                     Some(name) => name.clone(),
                     None => {
                         use heck::ToSnakeCase;
                         self.model.ident.to_string().to_snake_case()
                     }
+                };
+                let type_schema = match &custom_name.schema {
+                    Some(schema) => quote! { ::std::option::Option::Some(#schema.to_string()) },
+                    None => quote! { ::std::option::Option::None },
                 };
 
                 // Collect variant names in declaration order.
@@ -1125,6 +1129,7 @@ impl Expand<'_> {
                     ::std::option::Option::Some(
                         #toasty::core::schema::db::Type::Enum(
                             #toasty::core::schema::db::TypeEnum {
+                                schema: #type_schema,
                                 name: ::std::option::Option::Some(#type_name.to_string()),
                                 variants: vec![
                                     #( #toasty::core::schema::db::EnumVariant {

@@ -33,6 +33,7 @@ fn make_table(id: usize, name: &str, columns: Vec<Column>) -> Table {
 
     Table {
         id: TableId(id),
+        schema: None,
         name: name.to_string(),
         columns,
         primary_key: PrimaryKey {
@@ -48,6 +49,7 @@ fn make_table(id: usize, name: &str, columns: Vec<Column>) -> Table {
 
 fn make_enum_type(name: &str, variants: &[&str]) -> TypeEnum {
     TypeEnum {
+        schema: None,
         name: Some(name.to_string()),
         variants: variants
             .iter()

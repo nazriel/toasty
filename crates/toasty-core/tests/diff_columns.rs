@@ -30,6 +30,7 @@ fn make_schema_with_columns(table_id: usize, columns: Vec<Column>) -> Schema {
     let mut schema = Schema::default();
     schema.tables.push(Table {
         id: TableId(table_id),
+        schema: None,
         name: "test_table".to_string(),
         columns,
         primary_key: PrimaryKey {

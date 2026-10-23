@@ -7,6 +7,15 @@
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TypeEnum {
+    /// The database schema (namespace) a PostgreSQL enum type lives in, when it
+    /// is not found through the connection's `search_path`. Only drivers with
+    /// [`Capability::schema_qualified_names`](crate::driver::Capability::schema_qualified_names)
+    /// accept an enum type with a schema.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub schema: Option<String>,
     /// The type name used by PostgreSQL (`CREATE TYPE <name> AS ENUM`).
     /// `None` for MySQL (inline) and SQLite (CHECK constraint).
     pub name: Option<String>,

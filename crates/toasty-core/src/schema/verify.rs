@@ -162,11 +162,13 @@ impl Verify<'_> {
     }
 
     fn verify_index_names_are_unique(&self) -> Result<()> {
+        // An index lives in its table's schema, so names need only be unique
+        // within one schema.
         let mut names = HashSet::new();
 
         for table in &self.schema.db.tables {
             for index in &table.indices {
-                if !names.insert(&index.name) {
+                if !names.insert((&table.schema, &index.name)) {
                     return Err(crate::Error::invalid_schema(format!(
                         "duplicate index name `{}`",
                         index.name
@@ -243,14 +245,16 @@ impl Verify<'_> {
     fn verify_enum_type_names_are_unique(&self) -> Result<()> {
         // Collect all enum type names across all columns. If two columns share
         // the same enum type name, their variant sets must match exactly.
-        let mut seen: HashMap<&str, &[super::db::EnumVariant]> = HashMap::new();
+        // A type is identified by its schema and its name together.
+        let mut seen: HashMap<(Option<&str>, &str), &[super::db::EnumVariant]> = HashMap::new();
 
         for table in &self.schema.db.tables {
             for column in &table.columns {
                 if let Some(type_enum) = column.storage_ty.named_enum()
                     && let Some(name) = &type_enum.name
                 {
-                    match seen.get(name.as_str()) {
+                    let key = (type_enum.schema.as_deref(), name.as_str());
+                    match seen.get(&key) {
                         Some(existing) if *existing != type_enum.variants.as_slice() => {
                             return Err(crate::Error::invalid_schema(format!(
                                 "conflicting enum type name `{name}`: multiple embedded enums \
@@ -260,7 +264,7 @@ impl Verify<'_> {
                             )));
                         }
                         None => {
-                            seen.insert(name, &type_enum.variants);
+                            seen.insert(key, &type_enum.variants);
                         }
                         _ => {} // Same name, same variants — shared type, OK.
                     }

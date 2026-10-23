@@ -33,6 +33,7 @@ fn orders_schema() -> Schema {
     Schema {
         tables: vec![Table {
             id: TableId(0),
+            schema: None,
             name: "orders".to_string(),
             columns: vec![
                 column(0, "id", stmt::Type::I64, StorageType::Integer(8)),

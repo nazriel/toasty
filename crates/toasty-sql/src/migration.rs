@@ -15,7 +15,7 @@ use crate::stmt::{AlterColumnChanges, AlterTable, AlterTableAction, DropTable, N
 fn is_named_enum_type_only_change(
     previous: &Column,
     next: &Column,
-    renamed_types: &HashSet<(&str, &str)>,
+    renamed_types: &HashSet<(TypeKey<'_>, TypeKey<'_>)>,
 ) -> bool {
     if previous.name != next.name
         || previous.nullable != next.nullable
@@ -36,16 +36,41 @@ fn is_named_enum_type_only_change(
         return false;
     }
 
-    matches!(
-        (
-            previous.storage_ty.named_enum(),
-            next.storage_ty.named_enum(),
-        ),
-        (
-            Some(TypeEnum { name: Some(a), .. }),
-            Some(TypeEnum { name: Some(b), .. }),
-        ) if a == b || renamed_types.contains(&(a.as_str(), b.as_str()))
-    )
+    match (
+        previous.storage_ty.named_enum().and_then(type_key),
+        next.storage_ty.named_enum().and_then(type_key),
+    ) {
+        (Some(a), Some(b)) => a == b || renamed_types.contains(&(a, b)),
+        _ => false,
+    }
+}
+
+/// A named enum type's identity: its schema and its name.
+type TypeKey<'a> = (Option<&'a str>, &'a str);
+
+fn type_key(ty: &TypeEnum) -> Option<TypeKey<'_>> {
+    Some((ty.schema.as_deref(), ty.name.as_deref()?))
+}
+
+/// Panics if a table or an enum type moves to another database schema
+/// between the previous and the next snapshot.
+///
+/// On PostgreSQL that is `ALTER ... SET SCHEMA`, and whether the objects that
+/// refer to it should move along is a decision the schema does not record.
+/// The only correct migration is one the user writes.
+fn assert_schema_unchanged(kind: &str, name: &str, previous: Option<&str>, next: Option<&str>) {
+    if previous != next {
+        let describe = |schema: Option<&str>| match schema {
+            Some(schema) => format!("schema \"{schema}\""),
+            None => "the default schema".to_string(),
+        };
+        panic!(
+            "cannot move the {kind} \"{name}\" from {} to {}: moving a {kind} to another \
+             schema is not generated. Write this migration by hand.",
+            describe(previous),
+            describe(next),
+        );
+    }
 }
 
 /// Panics if `column` cannot be added to `table` on a database that already
@@ -92,16 +117,37 @@ impl<'a> MigrationStatement<'a> {
     pub fn from_diff(schema_diff: &'a diff::Schema<'a>, capability: &Capability) -> Vec<Self> {
         let mut result = Vec::new();
         let types_diff = schema_diff.types();
-        let renamed_types: HashSet<(&str, &str)> = types_diff
+        let renamed_types: HashSet<(TypeKey<'_>, TypeKey<'_>)> = types_diff
             .iter()
             .filter_map(|item| match item {
                 diff::Type::Rename { previous, next } => Some((
-                    previous.name.as_deref().expect("named enum type"),
-                    next.name.as_deref().expect("named enum type"),
+                    type_key(previous).expect("named enum type"),
+                    type_key(next).expect("named enum type"),
                 )),
                 _ => None,
             })
             .collect();
+
+        for item in types_diff.iter() {
+            if let diff::Type::Rename { previous, next } = item {
+                assert_schema_unchanged(
+                    "enum type",
+                    previous.name.as_deref().expect("named enum type"),
+                    previous.schema.as_deref(),
+                    next.schema.as_deref(),
+                );
+            }
+        }
+        for table in schema_diff.tables().iter() {
+            if let diff::Table::Alter { previous, next, .. } = table {
+                assert_schema_unchanged(
+                    "table",
+                    &previous.name,
+                    previous.schema.as_deref(),
+                    next.schema.as_deref(),
+                );
+            }
+        }
 
         // Emit enum type changes before table changes (tables may reference
         // newly created types).
@@ -117,17 +163,16 @@ impl<'a> MigrationStatement<'a> {
                     diff::Type::Rename { previous, next } => {
                         result.push(Self::new(
                             Statement::rename_type(
-                                previous.name.as_deref().expect("named enum type"),
+                                previous,
                                 next.name.as_deref().expect("named enum type"),
                             ),
                             Cow::Borrowed(schema_diff.previous()),
                         ));
                     }
                     diff::Type::AddVariants { ty, added } => {
-                        let type_name = ty.name.as_deref().expect("named enum type");
                         for variant in added {
                             result.push(Self::new(
-                                Statement::alter_type_add_value(type_name, variant),
+                                Statement::alter_type_add_value(ty, variant),
                                 Cow::Borrowed(schema_diff.next()),
                             ));
                         }
@@ -206,13 +251,16 @@ impl<'a> MigrationStatement<'a> {
                         match item {
                             diff::Index::Drop(index) if !index.primary_key => {
                                 result.push(Self::new(
-                                    Statement::drop_index(index),
+                                    Statement::drop_index(previous, index),
                                     Cow::Borrowed(schema_diff.previous()),
                                 ));
                             }
-                            diff::Index::Alter { previous, .. } if !previous.primary_key => {
+                            diff::Index::Alter {
+                                previous: previous_index,
+                                ..
+                            } if !previous_index.primary_key => {
                                 result.push(Self::new(
-                                    Statement::drop_index(previous),
+                                    Statement::drop_index(previous, previous_index),
                                     Cow::Borrowed(schema_diff.previous()),
                                 ));
                             }
@@ -386,7 +434,7 @@ impl<'a> MigrationStatement<'a> {
         table: TableId,
         columns: &[diff::Column<'_>],
         capability: &Capability,
-        renamed_types: &HashSet<(&str, &str)>,
+        renamed_types: &HashSet<(TypeKey<'_>, TypeKey<'_>)>,
     ) {
         for item in columns.iter() {
             match item {

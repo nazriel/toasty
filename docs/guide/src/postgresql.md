@@ -181,6 +181,15 @@ maps to a real PostgreSQL enum type created with `CREATE TYPE ... AS
 ENUM`. Adding a new variant requires an `ALTER TYPE ... ADD VALUE`,
 which the migration generator handles.
 
+**Schema-qualified names.** A model can name a table in another schema
+with [`#[table(schema = "...", name = "...")]`](./defining-models.md#table-names),
+and an enum its type with `#[column(type = enum(schema = "...", name =
+"..."))]`. Toasty writes them as `"schema"."name"`, so they need not be on
+the `search_path`. The migration generator qualifies the names it creates,
+alters and drops, but never creates a schema, and it stops with a message to
+write the migration by hand when a table or enum type moves to another
+schema.
+
 **Row-level locking.** Generated [transactions](./transactions.md) can
 use `SELECT ... FOR UPDATE` to lock rows for the duration of a
 transaction. SQLite and DynamoDB do not have row-level locking;

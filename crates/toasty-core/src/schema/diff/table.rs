@@ -47,14 +47,18 @@ impl<'a> Table<'a> {
         let mut changes = vec![];
         let mut create_ids: HashSet<_> = next.iter().map(|next| next.id).collect();
 
-        let next_map = HashMap::<&str, &'a db::Table>::from_iter(
-            next.iter().map(|next| (next.name.as_str(), next)),
+        // A table is matched by its schema and its name together.
+        let next_map = HashMap::<(Option<&str>, &str), &'a db::Table>::from_iter(
+            next.iter()
+                .map(|next| ((next.schema.as_deref(), next.name.as_str()), next)),
         );
 
         for previous in previous {
             let next = if let Some(next_id) = cx.rename_hints().get_table(previous.id) {
                 cx.next().table(next_id)
-            } else if let Some(to) = next_map.get(previous.name.as_str()) {
+            } else if let Some(to) =
+                next_map.get(&(previous.schema.as_deref(), previous.name.as_str()))
+            {
                 to
             } else {
                 changes.push(Self::Drop(previous));
@@ -65,7 +69,11 @@ impl<'a> Table<'a> {
 
             let columns = Column::diff(cx, &previous.columns, &next.columns);
             let indices = Index::diff(cx, &previous.indices, &next.indices);
-            if previous.name != next.name || !columns.is_empty() || !indices.is_empty() {
+            if previous.name != next.name
+                || previous.schema != next.schema
+                || !columns.is_empty()
+                || !indices.is_empty()
+            {
                 changes.push(Self::Alter {
                     previous,
                     next,

@@ -32,7 +32,7 @@ async fn build_db(models: toasty::schema::app::ModelSet) -> toasty::Db {
     let mut builder = toasty::Db::builder();
     builder.models(models);
     builder
-        .build(PostgreSQL::new(&url()).expect("Failed to create PostgreSQL driver"))
+        .build(PostgreSQL::new(url()).expect("Failed to create PostgreSQL driver"))
         .await
         .expect("Failed to build Db")
 }

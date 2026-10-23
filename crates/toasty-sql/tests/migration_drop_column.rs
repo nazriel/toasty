@@ -36,6 +36,7 @@ fn make_table(id: usize, name: &str, columns: Vec<Column>) -> Table {
 
     Table {
         id: TableId(id),
+        schema: None,
         name: name.to_string(),
         columns,
         primary_key: PrimaryKey {

@@ -24,6 +24,7 @@ fn db_schema() -> DbSchema {
     DbSchema {
         tables: vec![Table {
             id: table_id,
+            schema: None,
             name: "t".into(),
             columns: vec![Column {
                 id: ColumnId {

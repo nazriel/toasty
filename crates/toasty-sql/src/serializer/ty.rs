@@ -1,4 +1,4 @@
-use super::{Dialect, Ident, ToSql};
+use super::{Dialect, QualifiedIdent, ToSql};
 
 use toasty_core::schema::db;
 
@@ -120,13 +120,7 @@ impl ToSql for &db::Type {
             },
             db::Type::Enum(type_enum) => match f.serializer.dialect {
                 // PostgreSQL: reference the named enum type created with CREATE TYPE.
-                Dialect::Postgresql => {
-                    let name = type_enum
-                        .name
-                        .as_deref()
-                        .expect("PostgreSQL enums require a type name");
-                    fmt!(f, Ident(name));
-                }
+                Dialect::Postgresql => fmt!(f, QualifiedIdent::type_enum(type_enum)),
                 // MySQL: inline ENUM('label1', 'label2', ...) column type.
                 Dialect::Mysql | Dialect::MariaDb => {
                     use toasty_core::stmt::Value;

@@ -240,11 +240,21 @@ pub enum ColumnType {
     Inet,
     MacAddr,
     MacAddr8,
-    /// Native database enum type. The optional string is a custom PostgreSQL
-    /// type name; when `None`, the name is derived from the Rust enum in
-    /// snake_case.
-    Enum(Option<String>),
+    /// Native database enum type, with an optional custom PostgreSQL type
+    /// name and schema.
+    Enum(EnumTypeName),
     Custom(syn::LitStr),
+}
+
+/// The PostgreSQL type name given by `enum("name")` or
+/// `enum(schema = "...", name = "...")`. Both are `None` for a bare `enum`.
+#[derive(Debug, Default)]
+pub struct EnumTypeName {
+    /// The schema the type lives in. Only set together with `name`.
+    pub(crate) schema: Option<String>,
+    /// The type name; when `None`, the name is derived from the Rust enum in
+    /// snake_case.
+    pub(crate) name: Option<String>,
 }
 
 impl ColumnType {
@@ -348,12 +358,16 @@ impl syn::parse::Parse for ColumnType {
         peek_ident!(macaddr, MacAddr);
         peek_ident!(macaddr8, MacAddr8);
 
-        // `enum` or `enum("custom_type_name")`
+        // `enum`, `enum("custom_type_name")` or
+        // `enum(schema = "schema_name", name = "custom_type_name")`
         if lookahead.peek(syn::Token![enum]) {
             let _kw: syn::Token![enum] = input.parse()?;
             if input.peek(syn::token::Paren) {
                 let content;
                 parenthesized!(content in input);
+                if !content.peek(syn::LitStr) {
+                    return Ok(Self::Enum(EnumTypeName::parse_args(&content)?));
+                }
                 let lit: syn::LitStr = content.parse()?;
                 let name = lit.value();
                 if name.is_empty() {
@@ -362,13 +376,80 @@ impl syn::parse::Parse for ColumnType {
                         "enum type name must not be empty",
                     ));
                 }
-                return Ok(Self::Enum(Some(name)));
+                return Ok(Self::Enum(EnumTypeName {
+                    schema: None,
+                    name: Some(name),
+                }));
             } else {
-                return Ok(Self::Enum(None));
+                return Ok(Self::Enum(EnumTypeName::default()));
             }
         }
 
         Err(lookahead.error())
+    }
+}
+
+impl EnumTypeName {
+    /// Parses the named arguments of `enum(schema = "...", name = "...")`.
+    /// The names are taken whole; a dot is part of a name, not a separator.
+    fn parse_args(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut schema: Option<syn::LitStr> = None;
+        let mut name: Option<syn::LitStr> = None;
+        let mut schema_key: Option<syn::Ident> = None;
+
+        loop {
+            let key: syn::Ident = input.parse()?;
+            let slot = if key == "schema" {
+                schema_key = Some(key.clone());
+                &mut schema
+            } else if key == "name" {
+                &mut name
+            } else {
+                return Err(syn::Error::new_spanned(
+                    key,
+                    "unknown `enum` argument; expected `schema` or `name`",
+                ));
+            };
+
+            if slot.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &key,
+                    format!("`{key}` specified more than once"),
+                ));
+            }
+
+            let _eq_token: syn::Token![=] = input.parse()?;
+            let lit: syn::LitStr = input.parse()?;
+            if lit.value().is_empty() {
+                return Err(syn::Error::new_spanned(
+                    lit,
+                    format!("enum type {key} must not be empty"),
+                ));
+            }
+            *slot = Some(lit);
+
+            if input.is_empty() {
+                break;
+            }
+            let _comma_token: syn::Token![,] = input.parse()?;
+            if input.is_empty() {
+                break;
+            }
+        }
+
+        if name.is_none()
+            && let Some(schema_key) = schema_key
+        {
+            return Err(syn::Error::new_spanned(
+                schema_key,
+                "`schema` requires `name`: use `enum(schema = \"...\", name = \"...\")`",
+            ));
+        }
+
+        Ok(Self {
+            schema: schema.map(|lit| lit.value()),
+            name: name.map(|lit| lit.value()),
+        })
     }
 }
 

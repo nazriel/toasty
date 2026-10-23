@@ -146,6 +146,27 @@ struct User {
 
 This maps to a table named `people` instead of the default `users`.
 
+The list form `#[table(name = "people")]` does the same. On PostgreSQL it also
+takes a `schema`, for a table in a schema other than the connection's default:
+
+```rust
+#[derive(Debug, toasty::Model)]
+#[table(schema = "inventory", name = "items")]
+struct Item {
+    #[key]
+    id: u64,
+
+    name: String,
+}
+```
+
+Toasty then names the table `"inventory"."items"` in every statement, whether
+or not `inventory` is on the `search_path`. With `schema` alone, the table keeps
+its default name. Names are taken whole: `#[table = "a.b"]` is one table called
+`a.b`, not a table `b` in a schema `a`. Toasty does not create schemas; create
+one before `push_schema` or a migration uses it. Other databases refuse a
+schema-qualified table when the `Db` is built.
+
 > **Runnable example:** [`cms-article-fields`] covers field options — defaults, auto timestamps, `Json<T>`, a queryable `Vec<scalar>`, and deferred columns.
 
 

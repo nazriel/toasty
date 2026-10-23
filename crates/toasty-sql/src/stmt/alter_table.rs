@@ -20,10 +20,11 @@ pub enum AlterTableAction {
 }
 
 impl Statement {
-    /// Renames a table.
+    /// Renames a table. The new name is unqualified: the table stays in its
+    /// schema.
     pub fn alter_table_rename_to(table: &Table, new_name: &str) -> Self {
         AlterTable {
-            name: Name::from(&table.name[..]),
+            name: Name::qualified(table.schema.as_deref(), &table.name),
             action: AlterTableAction::RenameTo(Name::from(new_name)),
         }
         .into()

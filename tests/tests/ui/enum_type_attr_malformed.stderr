@@ -1,0 +1,29 @@
+error: `schema` requires `name`: use `enum(schema = "...", name = "...")`
+ --> tests/ui/enum_type_attr_malformed.rs:2:22
+  |
+2 | #[column(type = enum(schema = "inventory"))]
+  |                      ^^^^^^
+
+error: unknown `enum` argument; expected `schema` or `name`
+ --> tests/ui/enum_type_attr_malformed.rs:8:44
+  |
+8 | #[column(type = enum(schema = "inventory", label = "item_status"))]
+  |                                            ^^^^^
+
+error: enum type schema must not be empty
+  --> tests/ui/enum_type_attr_malformed.rs:14:31
+   |
+14 | #[column(type = enum(schema = "", name = "item_status"))]
+   |                               ^^
+
+error: enum type name must not be empty
+  --> tests/ui/enum_type_attr_malformed.rs:20:51
+   |
+20 | #[column(type = enum(schema = "inventory", name = ""))]
+   |                                                   ^^
+
+error: `name` specified more than once
+  --> tests/ui/enum_type_attr_malformed.rs:26:44
+   |
+26 | #[column(type = enum(name = "item_status", name = "stock_status"))]
+   |                                            ^^^^

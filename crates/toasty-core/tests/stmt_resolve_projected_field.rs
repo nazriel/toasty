@@ -69,6 +69,7 @@ fn root(id: ModelId, name: &str) -> Model {
             index,
         },
         table_name: name.to_string(),
+        table_schema: None,
         indices: vec![Index {
             id: index,
             name: None,

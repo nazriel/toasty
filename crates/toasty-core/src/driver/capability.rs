@@ -187,6 +187,20 @@ pub struct Capability {
     /// - DynamoDB: `false`
     pub named_enum_types: bool,
 
+    /// Whether a table or a named enum type may live in a database schema
+    /// other than the connection's default, named as `"schema"."name"`.
+    ///
+    /// Models declare it with `#[table(schema = "...", name = "...")]` and
+    /// enums with `#[column(type = enum(schema = "...", name = "..."))]`. When
+    /// `false`, building a schema that uses either fails with
+    /// [`unsupported_feature`](crate::Error::unsupported_feature).
+    ///
+    /// - PostgreSQL: `true`
+    /// - MySQL / MariaDB: `false` — a schema is a separate database
+    /// - SQLite: `false` — `schema.table` names an attached database
+    /// - DynamoDB: `false`
+    pub schema_qualified_names: bool,
+
     /// Whether the database has native support for Decimal types.
     pub native_decimal: bool,
 
@@ -698,6 +712,10 @@ impl Capability {
         native_enum: false,
         named_enum_types: false,
 
+        // SQLite reads `schema.table` as a table of an attached database,
+        // which Toasty does not manage.
+        schema_qualified_names: false,
+
         // SQLite does not have native date/time types
         native_timestamp: false,
         native_date: false,
@@ -798,6 +816,10 @@ impl Capability {
         // PostgreSQL has CREATE TYPE ... AS ENUM
         native_enum: true,
         named_enum_types: true,
+
+        // PostgreSQL names tables and types as `"schema"."name"`.
+        schema_qualified_names: true,
+
         native_json: true,
         native_jsonb: true,
 
@@ -973,6 +995,7 @@ impl Capability {
         native_jsonb: false,
         native_enum: false,
         named_enum_types: false,
+        schema_qualified_names: false,
 
         // DynamoDB does not have native date/time types
         native_timestamp: false,

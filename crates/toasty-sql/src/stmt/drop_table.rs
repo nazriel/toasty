@@ -18,7 +18,7 @@ impl Statement {
     /// This function _does not_ add an `IF EXISTS` clause.
     pub fn drop_table(table: &Table) -> Self {
         DropTable {
-            name: Name::from(&table.name[..]),
+            name: Name::qualified(table.schema.as_deref(), &table.name),
             if_exists: false,
         }
         .into()
@@ -29,7 +29,7 @@ impl Statement {
     /// This function _does_ add an `IF EXISTS` clause.
     pub fn drop_table_if_exists(table: &Table) -> Self {
         DropTable {
-            name: Name::from(&table.name[..]),
+            name: Name::qualified(table.schema.as_deref(), &table.name),
             if_exists: true,
         }
         .into()

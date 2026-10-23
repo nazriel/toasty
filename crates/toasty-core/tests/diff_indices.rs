@@ -58,6 +58,7 @@ fn make_schema_with_indices(table_id: usize, columns: Vec<Column>, indices: Vec<
     let mut schema = Schema::default();
     schema.tables.push(Table {
         id: TableId(table_id),
+        schema: None,
         name: "test_table".to_string(),
         columns,
         primary_key: PrimaryKey {

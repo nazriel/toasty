@@ -36,9 +36,9 @@ struct BuildSchema<'a> {
 
     db: &'a driver::Capability,
 
-    /// Maps table names to identifiers. The identifiers are reserved before the
-    /// table objects are actually created.
-    table_lookup: IndexMap<String, TableId>,
+    /// Maps `(schema, name)` table keys to identifiers. The identifiers are
+    /// reserved before the table objects are actually created.
+    table_lookup: IndexMap<(Option<String>, String), TableId>,
 
     /// Tables as they are built.
     tables: Vec<Table>,
@@ -244,6 +244,10 @@ impl BuildSchema<'_> {
     fn build_model_constraints(&self, model: &mut app::Model) -> Result<()> {
         let model_name = model.name().to_string();
 
+        if !self.db.schema_qualified_names {
+            self.verify_no_schema_qualified_names(model)?;
+        }
+
         // Collect Bool fields used as key/index attributes on backends that
         // don't support BOOL as a key attribute type (e.g. DynamoDB). These
         // need db::Type::Integer(1) as their storage type.
@@ -330,6 +334,61 @@ impl BuildSchema<'_> {
 
         Ok(())
     }
+}
+
+impl BuildSchema<'_> {
+    /// Rejects a model whose table, or an enum type it stores, names a
+    /// database schema, on a driver without
+    /// [`schema_qualified_names`](driver::Capability::schema_qualified_names).
+    fn verify_no_schema_qualified_names(&self, model: &app::Model) -> Result<()> {
+        let driver_name = self.db.driver_name;
+
+        if let app::Model::Root(root) = model
+            && let Some(schema) = &root.table_schema
+        {
+            return Err(crate::Error::unsupported_feature(format!(
+                "model `{}` maps to the schema-qualified table `{schema}.{}`, which is \
+                 not supported by the {driver_name} driver",
+                root.name, root.table_name
+            )));
+        }
+
+        let enum_types = match model {
+            app::Model::Root(root) => primitive_storage_types(&root.fields),
+            app::Model::EmbeddedStruct(embedded) => primitive_storage_types(&embedded.fields),
+            app::Model::EmbeddedEnum(embedded) => {
+                let mut types = primitive_storage_types(&embedded.fields);
+                types.extend(embedded.discriminant.storage_ty.as_ref());
+                types
+            }
+        };
+
+        for ty in enum_types {
+            if let Some(type_enum) = ty.named_enum()
+                && let Some(schema) = &type_enum.schema
+            {
+                return Err(crate::Error::unsupported_feature(format!(
+                    "`{}` uses the schema-qualified enum type `{schema}.{}`, which is \
+                     not supported by the {driver_name} driver",
+                    model.name(),
+                    type_enum.name.as_deref().unwrap_or_default()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// The storage-type overrides of a model's primitive fields.
+fn primitive_storage_types(fields: &[app::Field]) -> Vec<&db::Type> {
+    fields
+        .iter()
+        .filter_map(|field| match &field.ty {
+            app::FieldTy::Primitive(primitive) => primitive.storage_ty.as_ref(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The name of a `#[document]` leaf scalar type that JSON document storage

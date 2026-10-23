@@ -128,6 +128,25 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
+/// `#[table(name = "...")]` is the same override in list form. Add `schema =
+/// "..."` to name a table in another database schema; without `name`, the
+/// table keeps its default name. The names are taken whole: a dot is part of
+/// a name, so `#[table = "a.b"]` names one table called `a.b`.
+///
+/// ```
+/// # use toasty::Model;
+/// #[derive(Model)]
+/// #[table(schema = "inventory", name = "items")]
+/// struct Item {
+///     #[key]
+///     id: i64,
+/// }
+/// ```
+///
+/// Schema-qualified names are supported on PostgreSQL only; on other
+/// databases building the `Db` fails with an unsupported-feature error.
+/// Toasty never creates the schema itself.
+///
 /// # Field-level attributes
 ///
 /// ## `#[key]` — mark a field as a primary key column
@@ -1126,6 +1145,11 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// or `#[column(type = text)]` or `#[column(type = varchar(N))]` to use a
 /// plain string column. `rename_all` changes variant labels only; it does not
 /// change the enum type name.
+///
+/// On PostgreSQL, `#[column(type = enum(schema = "schema_name", name =
+/// "type_name"))]` names an enum type in another database schema. `schema`
+/// requires `name`. Other databases refuse a schema-qualified type when the
+/// `Db` is built.
 ///
 /// To store integers instead, assign an integer to every variant:
 ///

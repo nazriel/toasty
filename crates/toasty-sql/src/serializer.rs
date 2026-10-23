@@ -13,7 +13,7 @@ use delim::{Comma, Delimited, Period};
 mod dialect;
 
 mod ident;
-use ident::Ident;
+use ident::{Ident, QualifiedIdent};
 
 mod params;
 pub use params::Placeholder;
@@ -274,9 +274,8 @@ impl<'a> Serializer<'a> {
         self.schema.index(id.into())
     }
 
-    fn table_name(&self, id: impl Into<db::TableId>) -> Ident<&str> {
-        let table = self.schema.table(id.into());
-        Ident(&table.name)
+    fn table_name(&self, id: impl Into<db::TableId>) -> QualifiedIdent<'a> {
+        QualifiedIdent::table(self.schema.table(id.into()))
     }
 
     fn column_name(&self, id: impl Into<db::ColumnId>) -> Ident<&str> {

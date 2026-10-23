@@ -1,0 +1,41 @@
+error: unknown `table` argument; expected `schema` or `name`
+ --> tests/ui/table_attr_malformed.rs:2:31
+  |
+2 | #[table(schema = "inventory", label = "items")]
+  |                               ^^^^^
+
+error: `name` must be a non-empty string
+ --> tests/ui/table_attr_malformed.rs:9:16
+  |
+9 | #[table(name = "")]
+  |                ^^
+
+error: `schema` must be a non-empty string
+  --> tests/ui/table_attr_malformed.rs:16:18
+   |
+16 | #[table(schema = "", name = "items")]
+   |                  ^^
+
+error: `name` specified more than once
+  --> tests/ui/table_attr_malformed.rs:23:25
+   |
+23 | #[table(name = "items", name = "products")]
+   |                         ^^^^
+
+error: `schema` specified more than once
+  --> tests/ui/table_attr_malformed.rs:30:31
+   |
+30 | #[table(schema = "inventory", schema = "audit")]
+   |                               ^^^^^^
+
+error: expected `table(name = "...")` or `table(schema = "...", name = "...")`
+  --> tests/ui/table_attr_malformed.rs:37:1
+   |
+37 | #[table()]
+   | ^^^^^^^^^^
+
+error: duplicate `table` attribute
+  --> tests/ui/table_attr_malformed.rs:45:1
+   |
+45 | #[table = "products"]
+   | ^^^^^^^^^^^^^^^^^^^^^

@@ -46,22 +46,23 @@ impl<'a> Type<'a> {
         let mut changes = Vec::new();
         let mut renamed = HashSet::new();
 
-        for (name, next_type) in &next_types {
-            match prev_types.get(name) {
+        for (key, next_type) in &next_types {
+            let name = key.1;
+            match prev_types.get(key) {
                 None => {
-                    let rename = prev_types.iter().find(|(previous_name, previous_type)| {
-                        !next_types.contains_key(*previous_name)
-                            && !renamed.contains(*previous_name)
+                    let rename = prev_types.iter().find(|(previous_key, previous_type)| {
+                        !next_types.contains_key(*previous_key)
+                            && !renamed.contains(*previous_key)
                             && previous_type.columns == next_type.columns
                             && variants_are_prefix(previous_type.ty, next_type.ty)
                     });
 
-                    if let Some((previous_name, previous_type)) = rename {
+                    if let Some((previous_key, previous_type)) = rename {
                         changes.push(Self::Rename {
                             previous: previous_type.ty,
                             next: next_type.ty,
                         });
-                        renamed.insert(*previous_name);
+                        renamed.insert(*previous_key);
                         add_variants(&mut changes, name, previous_type.ty, next_type.ty);
                     } else {
                         changes.push(Self::Create(next_type.ty));
@@ -77,12 +78,16 @@ impl<'a> Type<'a> {
     }
 }
 
+/// A named enum type's identity: its schema and its name.
+type EnumKey<'a> = (Option<&'a str>, &'a str);
+
 struct NamedEnum<'a> {
     ty: &'a db::TypeEnum,
-    columns: HashSet<(&'a str, &'a str, bool)>,
+    /// The columns using the type: `(table schema, table, column, is list)`.
+    columns: HashSet<(Option<&'a str>, &'a str, &'a str, bool)>,
 }
 
-fn collect_named_enums(schema: &db::Schema) -> HashMap<&str, NamedEnum<'_>> {
+fn collect_named_enums(schema: &db::Schema) -> HashMap<EnumKey<'_>, NamedEnum<'_>> {
     let mut result = HashMap::new();
     for table in &schema.tables {
         for column in &table.columns {
@@ -90,13 +95,14 @@ fn collect_named_enums(schema: &db::Schema) -> HashMap<&str, NamedEnum<'_>> {
                 && let Some(name) = &type_enum.name
             {
                 result
-                    .entry(name.as_str())
+                    .entry((type_enum.schema.as_deref(), name.as_str()))
                     .or_insert_with(|| NamedEnum {
                         ty: type_enum,
                         columns: HashSet::new(),
                     })
                     .columns
                     .insert((
+                        table.schema.as_deref(),
                         table.name.as_str(),
                         column.name.as_str(),
                         matches!(column.storage_ty, db::Type::List(_)),

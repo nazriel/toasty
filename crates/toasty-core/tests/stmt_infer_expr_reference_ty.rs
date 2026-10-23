@@ -44,6 +44,7 @@ fn db_schema(col_types: &[(Type, &str)]) -> Schema {
     Schema {
         tables: vec![Table {
             id: table_id,
+            schema: None,
             name: "t".to_string(),
             columns,
             primary_key: DbPrimaryKey {
@@ -106,6 +107,7 @@ fn model_root(id: usize, field_types: &[(Type, &str)]) -> ModelRoot {
             },
         },
         table_name: "t".to_string(),
+        table_schema: None,
         indices: vec![],
         version_field: None,
     }

@@ -153,14 +153,20 @@ struct MapField<'a, 'b> {
 
 impl BuildSchema<'_> {
     pub(super) fn build_table_stub_for_model(&mut self, model: &ModelRoot) -> TableId {
-        let table_name = self.prefix_table_name(&model.table_name);
+        // A table is identified by its schema and its name together: two
+        // models may name tables `items` in two different schemas.
+        let key = (
+            model.table_schema.clone(),
+            self.prefix_table_name(&model.table_name),
+        );
 
-        if !self.table_lookup.contains_key(&table_name) {
-            let id = self.register_table(&table_name);
-            self.tables.push(Table::new(id, table_name.clone()));
+        if !self.table_lookup.contains_key(&key) {
+            let id = self.register_table(key.clone());
+            let (schema, name) = key.clone();
+            self.tables.push(Table::new(id, schema, name));
         }
 
-        *self.table_lookup.get(&table_name).unwrap()
+        *self.table_lookup.get(&key).unwrap()
     }
 
     pub(super) fn build_tables_from_models(
@@ -194,10 +200,10 @@ impl BuildSchema<'_> {
         Ok(())
     }
 
-    pub(super) fn register_table(&mut self, name: impl AsRef<str>) -> TableId {
-        assert!(!self.table_lookup.contains_key(name.as_ref()));
+    pub(super) fn register_table(&mut self, key: (Option<String>, String)) -> TableId {
+        assert!(!self.table_lookup.contains_key(&key));
         let id = TableId(self.table_lookup.len());
-        self.table_lookup.insert(name.as_ref().to_string(), id);
+        self.table_lookup.insert(key, id);
         id
     }
 

@@ -382,6 +382,7 @@ fn merge_column_wins_over_inferred() {
     use super::infer::merge;
 
     let col = Ty::Column(db::Type::Enum(db::TypeEnum {
+        schema: None,
         name: Some("status".to_string()),
         variants: vec![],
     }));

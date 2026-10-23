@@ -689,6 +689,7 @@ mod tests {
     fn make_table() -> db::Table {
         db::Table {
             id: TableId(0),
+            schema: None,
             name: "t".to_string(),
             columns: vec![Column {
                 id: ColumnId {

@@ -13,6 +13,7 @@ impl Expand<'_> {
         let fields = self.expand_model_fields();
         let indices = self.expand_model_indices();
         let table_name = self.expand_table_name();
+        let table_schema = self.expand_table_schema();
 
         let model = match &self.model.kind {
             ModelKind::Root(root) => {
@@ -37,6 +38,7 @@ impl Expand<'_> {
                             fields: #fields,
                             primary_key: #primary_key,
                             table_name: #table_name,
+                            table_schema: #table_schema,
                             indices: #indices,
                             version_field: #version_field,
                         }
@@ -392,6 +394,16 @@ impl Expand<'_> {
         };
 
         quote! { #table_name.to_string() }
+    }
+
+    fn expand_table_schema(&self) -> TokenStream {
+        match &self.model.table_schema {
+            Some(schema) => {
+                let schema = schema.value();
+                quote! { ::std::option::Option::Some(#schema.to_string()) }
+            }
+            None => quote! { ::std::option::Option::None },
+        }
     }
 }
 

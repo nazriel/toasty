@@ -1,6 +1,6 @@
 use super::{
-    Column, ColumnType, ErrorSet, Field, FieldTy, Index, IndexField, IndexScope, ModelAttr, Name,
-    PrimaryKey, Variant, VariantValue,
+    Column, ColumnType, EnumTypeName, ErrorSet, Field, FieldTy, Index, IndexField, IndexScope,
+    ModelAttr, Name, PrimaryKey, Variant, VariantValue,
 };
 use heck::ToSnakeCase;
 
@@ -90,9 +90,9 @@ pub(crate) struct ModelEmbeddedStruct {
 /// How the enum discriminant column is stored in the database.
 #[derive(Debug)]
 pub(crate) enum EnumStorageStrategy {
-    /// Native database enum type (default for string-label enums).
-    /// The optional string is a custom PostgreSQL type name.
-    NativeEnum(Option<String>),
+    /// Native database enum type (default for string-label enums), with an
+    /// optional custom PostgreSQL type name and schema.
+    NativeEnum(EnumTypeName),
     /// Plain text/varchar column, no database-level enum enforcement.
     PlainString(ColumnType),
     /// Explicit integer storage type for an integer-discriminant enum.
@@ -152,6 +152,9 @@ pub(crate) struct Model {
 
     /// Optional table to map the model to
     pub(crate) table: Option<syn::LitStr>,
+
+    /// Optional database schema the model's table lives in
+    pub(crate) table_schema: Option<syn::LitStr>,
 }
 
 impl Model {
@@ -419,6 +422,7 @@ impl Model {
             kind,
             indices,
             table: model_attr.table,
+            table_schema: model_attr.table_schema,
         })
     }
 
@@ -668,7 +672,7 @@ impl Model {
                     Some(EnumStorageStrategy::NativeEnum(custom_name))
                 }
                 // No explicit type attribute: default to native enum.
-                None => Some(EnumStorageStrategy::NativeEnum(None)),
+                None => Some(EnumStorageStrategy::NativeEnum(EnumTypeName::default())),
                 // Any other type override on an enum is an error.
                 Some(_) => {
                     return Err(syn::Error::new_spanned(
@@ -755,6 +759,7 @@ impl Model {
             }),
             indices,
             table: None,
+            table_schema: None,
         })
     }
 }

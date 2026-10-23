@@ -1,6 +1,6 @@
-use super::Statement;
+use super::{Name, Statement};
 
-use toasty_core::schema::db::EnumVariant;
+use toasty_core::schema::db::{EnumVariant, TypeEnum};
 
 /// An `ALTER TYPE ... ADD VALUE '...'` statement.
 ///
@@ -8,21 +8,32 @@ use toasty_core::schema::db::EnumVariant;
 /// statement represents adding a single variant to an existing named enum type.
 #[derive(Debug, Clone)]
 pub struct AlterType {
-    /// The name of the enum type to alter.
-    pub type_name: String,
+    /// The name of the enum type to alter, qualified by its schema when it
+    /// has one.
+    pub type_name: Name,
     /// The new variant to add.
     pub variant: EnumVariant,
 }
 
 impl Statement {
     /// Creates an `ALTER TYPE <name> ADD VALUE '<variant>'` statement.
-    pub fn alter_type_add_value(type_name: &str, variant: &EnumVariant) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ty` has no type name.
+    pub fn alter_type_add_value(ty: &TypeEnum, variant: &EnumVariant) -> Self {
         AlterType {
-            type_name: type_name.to_string(),
+            type_name: type_enum_name(ty),
             variant: variant.clone(),
         }
         .into()
     }
+}
+
+/// The schema-qualified name of a named enum type.
+pub(super) fn type_enum_name(ty: &TypeEnum) -> Name {
+    let name = ty.name.as_deref().expect("named enum type");
+    Name::qualified(ty.schema.as_deref(), name)
 }
 
 impl From<AlterType> for Statement {

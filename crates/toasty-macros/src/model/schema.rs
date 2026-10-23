@@ -41,4 +41,4 @@ mod variant;
 pub(crate) use variant::Variant;
 
 mod column;
-pub(crate) use column::{Column, ColumnType, VariantValue};
+pub(crate) use column::{Column, ColumnType, EnumTypeName, VariantValue};

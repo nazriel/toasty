@@ -314,6 +314,12 @@ The `status` column stores `pending`, `active`, or `done`. PostgreSQL uses a
 named enum type, MySQL uses `ENUM`, and SQLite uses `TEXT` with a check
 constraint. DynamoDB stores the label as a string attribute.
 
+The PostgreSQL type is named after the enum in snake_case (`status`). Set
+another name with `#[column(type = enum("task_status"))]` on the enum, and, on
+PostgreSQL only, a schema for a type that lives outside the connection's
+default schema with `#[column(type = enum(schema = "work", name =
+"task_status"))]`.
+
 Use it like any other field:
 
 ```rust,ignore
