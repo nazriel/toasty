@@ -73,6 +73,7 @@ pub mod key_unsigned;
 pub mod lift_belongs_to_complex_filter;
 pub mod order_by_nulls;
 pub mod order_by_related_value;
+pub mod order_by_related_value_typed;
 pub mod paginate_include;
 pub mod paginate_multi_column;
 pub mod query_aggregate;

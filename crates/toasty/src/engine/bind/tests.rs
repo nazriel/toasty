@@ -196,6 +196,106 @@ fn non_enum_insert_keeps_default_types() {
 }
 
 // ============================================================================
+// Type refinement inside ORDER BY
+// ============================================================================
+
+/// `SELECT … FROM <table> ORDER BY (SELECT … FROM <table> WHERE <column> = <value>)`:
+/// the correlated scalar subquery `Query::value_for` leaves in an `ORDER BY`.
+fn order_by_subquery_filtering(
+    schema: &toasty_core::Schema,
+    table_name: &str,
+    column_name: &str,
+    value: Value,
+) -> stmt::Statement {
+    let table = schema
+        .db
+        .tables
+        .iter()
+        .find(|t| t.name.ends_with(table_name))
+        .unwrap_or_else(|| panic!("table '{table_name}' not found in schema"));
+    let column = table
+        .columns
+        .iter()
+        .find(|c| c.name == column_name)
+        .unwrap_or_else(|| panic!("column '{column_name}' not found in '{table_name}'"));
+
+    let subquery = stmt::Query::new_select(
+        stmt::Source::table(table.id),
+        Expr::eq(
+            Expr::column(stmt::ExprReference::column(0, column.id.index)),
+            Expr::Value(value),
+        ),
+    );
+
+    let mut query = stmt::Query::new_select(stmt::Source::table(table.id), stmt::Filter::default());
+    query.order_by = Some(stmt::OrderBy::from(stmt::OrderByExpr::new(Expr::stmt(
+        stmt::Statement::Query(subquery),
+    ))));
+
+    stmt::Statement::Query(query)
+}
+
+#[test]
+fn order_by_subquery_refines_an_enum_filter_to_enum() {
+    #[derive(Debug, toasty::Embed)]
+    enum Status {
+        Active,
+        Inactive,
+    }
+
+    #[derive(toasty::Model)]
+    struct Task {
+        #[key]
+        id: String,
+        status: Status,
+    }
+
+    let schema = test_schema_postgresql(&[Task::schema(), Status::schema()]);
+
+    let mut stmt = order_by_subquery_filtering(&schema, "tasks", "status", Value::from("active"));
+
+    let params = run(
+        &mut stmt,
+        &schema.db,
+        &toasty_core::driver::Capability::SQLITE,
+    );
+
+    assert_eq!(params.len(), 1);
+    assert!(
+        matches!(&params[0].ty, db::Type::Enum(_)),
+        "expected Enum type for the filter param, got {:?}",
+        params[0].ty
+    );
+}
+
+#[test]
+fn order_by_subquery_refines_a_float_filter_to_the_column_type() {
+    #[derive(toasty::Model)]
+    struct Item {
+        #[key]
+        id: String,
+        weight: f64,
+    }
+
+    let schema = test_schema_with(&[Item::schema()]);
+
+    let mut stmt = order_by_subquery_filtering(&schema, "items", "weight", Value::from(1.5f64));
+
+    let params = run(
+        &mut stmt,
+        &schema.db,
+        &toasty_core::driver::Capability::SQLITE,
+    );
+
+    assert_eq!(params.len(), 1);
+    assert!(
+        matches!(&params[0].ty, db::Type::Float(8)),
+        "expected Float(8) for the filter param, got {:?}",
+        params[0].ty
+    );
+}
+
+// ============================================================================
 // Projection type inference
 // ============================================================================
 

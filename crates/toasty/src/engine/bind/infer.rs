@@ -201,6 +201,15 @@ fn refine_query(query: &stmt::Query, cx: &Cx<'_>, params: &mut [Param]) {
         _ => {}
     }
 
+    // `ORDER BY` shares the query's scope. A correlated scalar subquery there
+    // (`Query::value_for`) stays an `Expr::Stmt` through lowering, so its
+    // comparisons need the same column-driven refinement as the filter's.
+    if let Some(order_by) = &query.order_by {
+        for item in &order_by.exprs {
+            synthesize(&item.expr, &cx, params);
+        }
+    }
+
     // Handle CTEs
     if let Some(with) = &query.with {
         for cte in &with.ctes {
