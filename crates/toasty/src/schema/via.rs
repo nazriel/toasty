@@ -6,7 +6,9 @@ use toasty_core::schema::app::{self, FieldTy, ModelId, Via};
 use toasty_core::stmt;
 
 /// Placeholder via target for a scalar terminal, overwritten when `toasty-core`
-/// resolves the relation chain while linking. It must never reach a query.
+/// resolves the relation chain while linking. A via query's source carries it
+/// until lowering replaces it (`RewriteVia`), so code that inspects a statement
+/// earlier must resolve the target from the via path instead of reading the id.
 const UNRESOLVED_TARGET: ModelId = ModelId(usize::MAX);
 
 /// Implemented by a `#[has_many(via = …)]` field's Rust type, exposing the

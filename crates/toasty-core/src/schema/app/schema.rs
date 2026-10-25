@@ -1,4 +1,4 @@
-use super::{EnumVariant, Field, FieldId, FieldPrimitive, FieldTy, Model, ModelId};
+use super::{EnumVariant, Field, FieldId, FieldPrimitive, FieldTy, Model, ModelId, Via};
 
 use crate::{Result, stmt};
 use indexmap::IndexMap;
@@ -255,6 +255,20 @@ impl Schema {
     pub fn resolve_field_path<'a>(&'a self, path: &stmt::Path) -> Option<&'a Field> {
         let model = self.model(path.root.as_model_unwrap());
         self.resolve_field(model, &path.projection)
+    }
+
+    /// Resolves a [`stmt::Path`] to the [`Via`] field it names.
+    ///
+    /// Returns `None` if the path's root is not a known model, the path does
+    /// not resolve to a field, or the field is not a `via` relation. A via
+    /// source query carries a placeholder model id until lowering, so callers
+    /// that run earlier use this instead of looking the source's id up.
+    pub fn resolve_via_path(&self, path: &stmt::Path) -> Option<&Via> {
+        let model = self.get_model(path.root.as_model_unwrap())?;
+        match &self.resolve_field(model, &path.projection)?.ty {
+            FieldTy::Via(via) => Some(via),
+            _ => None,
+        }
     }
 }
 

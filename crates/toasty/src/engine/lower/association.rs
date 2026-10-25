@@ -79,14 +79,11 @@ impl<'a> RewriteVia<'a> {
             //
             // A model-terminal via has `terminal == None` — its source already
             // selects whole target records — so this is a no-op there.
-            let scalar_terminal =
-                self.schema()
-                    .app
-                    .resolve_field_path(&via.path)
-                    .and_then(|field| match &field.ty {
-                        app::FieldTy::Via(v) => v.terminal.map(|terminal| (v.target, terminal)),
-                        _ => None,
-                    });
+            let scalar_terminal = self
+                .schema()
+                .app
+                .resolve_via_path(&via.path)
+                .and_then(|v| v.terminal.map(|terminal| (v.target, terminal)));
 
             if let Some((target, _)) = scalar_terminal {
                 model.id = target;

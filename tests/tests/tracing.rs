@@ -317,3 +317,72 @@ async fn query_event_inherits_caller_span() {
     assert_eq!(query_fields["stmt.kind"], "query");
     assert_eq!(query_fields["model"], "User");
 }
+
+#[derive(Debug, toasty::Model)]
+struct Author {
+    #[key]
+    #[auto]
+    id: i64,
+
+    name: String,
+
+    #[has_many]
+    posts: toasty::Deferred<Vec<Post>>,
+
+    #[has_many(via = posts.title)]
+    post_titles: toasty::Deferred<Vec<String>>,
+}
+
+#[derive(Debug, toasty::Model)]
+struct Post {
+    #[key]
+    #[auto]
+    id: i64,
+
+    title: String,
+
+    #[index]
+    author_id: i64,
+
+    #[belongs_to(key = author_id, references = id)]
+    author: toasty::Deferred<Author>,
+}
+
+/// A scalar-terminal `via` query carries a placeholder model id until
+/// lowering resolves it. The query span must record the model the query
+/// reads from instead of panicking on the placeholder.
+#[tokio::test]
+async fn query_span_resolves_scalar_via_model() {
+    let (events, _guard) = capture();
+    let mut builder = toasty::Db::builder();
+    builder.models(toasty::models!(Author, Post));
+    let mut db = builder
+        .build(toasty_driver_sqlite::Sqlite::in_memory())
+        .await
+        .unwrap();
+    db.push_schema().await.unwrap();
+
+    let author = toasty::create!(Author { name: "Alice" })
+        .exec(&mut db)
+        .await
+        .unwrap();
+    toasty::create!(Post::[
+        { title: "First", author: &author },
+        { title: "Second", author: &author },
+    ])
+    .exec(&mut db)
+    .await
+    .unwrap();
+    events.lock().unwrap().clear();
+
+    let mut titles = author.post_titles().exec(&mut db).await.unwrap();
+    titles.sort();
+    assert_eq!(titles, ["First", "Second"]);
+
+    let captured = query_events(&events);
+    assert_eq!(captured.len(), 1, "captured: {captured:#?}");
+    let (name, query_fields) = captured[0].scope.last().unwrap();
+    assert_eq!(name, "query");
+    assert_eq!(query_fields["stmt.kind"], "query");
+    assert_eq!(query_fields["model"], "Post");
+}
