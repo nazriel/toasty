@@ -243,6 +243,7 @@ impl stmt::Visit for Verify<'_, '_> {
 
         self.verify_single_query(i);
         self.verify_aggregates(i);
+        self.verify_select_subqueries(i);
         self.verify_order_by(i);
         self.verify_offset_key_matches_order_by(i);
         self.verify_limit_is_integer_literal(i);
@@ -358,6 +359,69 @@ impl Verify<'_, '_> {
                  use limit and offset instead",
             ));
         }
+    }
+
+    /// A relation predicate (`any`, `all`) and a value of a related record
+    /// (`Query::value_for`) read by a select are subqueries the database
+    /// evaluates for each row, so they are SQL. A related value reads one
+    /// stored value: its field is neither nullable (the value would read as
+    /// `Option<Option<T>>`) nor an embedded type.
+    fn verify_select_subqueries(&mut self, i: &stmt::Query) {
+        let stmt::ExprSet::Select(select) = &i.body else {
+            return;
+        };
+        let Some(returning) = select.returning.as_project() else {
+            return;
+        };
+
+        CheckSelectSubqueries { verify: self }.visit_expr(returning);
+    }
+
+    /// Rejects a value of a related record whose field the select cannot
+    /// read as one stored value.
+    fn verify_related_value_field(&mut self, query: &stmt::Query) {
+        let stmt::ExprSet::Select(select) = &query.body else {
+            return;
+        };
+        let (Some(value), Some(source)) = (select.returning.as_project(), select.source.as_model())
+        else {
+            return;
+        };
+
+        let mut error = None;
+        let target = VerifyExpr {
+            schema: self.schema,
+            capability: self.capability,
+            model: source.id,
+            error: &mut error,
+        }
+        .resolve_expr_path(value);
+
+        let reason = match target {
+            Some(PathTarget::Field(field)) if field.nullable => {
+                format!("the field `{}` is nullable", field.name)
+            }
+            Some(PathTarget::Field(field)) => match &field.ty {
+                app::FieldTy::Primitive(primitive)
+                    if !matches!(primitive.ty, stmt::Type::Model(_)) =>
+                {
+                    return;
+                }
+                app::FieldTy::Primitive(_) | app::FieldTy::Embedded(_) => {
+                    format!("the field `{}` is an embedded type", field.name)
+                }
+                _ => format!("the field `{}` is a relation", field.name),
+            },
+            Some(PathTarget::Variant(_) | PathTarget::Document) => {
+                "the value is an embedded type".to_owned()
+            }
+            None => return,
+        };
+
+        self.record(Error::unsupported_feature(format!(
+            "a value of a related record in select reads one stored value of a primitive, \
+             non-nullable field; {reason}"
+        )));
     }
 
     /// Aggregates (`count`, `sum`, `avg`, `min`, `max`), `group_by` and
@@ -706,11 +770,129 @@ impl stmt::Visit for CheckGrouped<'_, '_, '_> {
                      a group_by key nor inside an aggregate"
                 )));
             }
-            // A subquery reads its own records.
-            stmt::Expr::Stmt(_) => {}
+            // A subquery reads its own records. A value of a related record
+            // also reads the group's row through its correlation key, which
+            // must be a grouping key.
+            stmt::Expr::Stmt(expr_stmt) => {
+                let Statement::Query(query) = &*expr_stmt.stmt else {
+                    return;
+                };
+                for path in enclosing_row_paths(query) {
+                    if self.keys.contains(&path) {
+                        continue;
+                    }
+                    let name = self
+                        .verify
+                        .column_path_field(self.model, &path)
+                        .map(|field| format!("`{}` ", field.name))
+                        .unwrap_or_default();
+                    self.verify.record(Error::invalid_statement(format!(
+                        "a value of a related record reads the field {name}of a grouped or \
+                         aggregating query's record, which is not a group_by key"
+                    )));
+                }
+            }
+            // A relation predicate reads the record's side of the relation;
+            // its subquery reads its own records.
+            stmt::Expr::InSubquery(in_subquery) => self.visit_expr(&in_subquery.expr),
             _ => stmt::visit::visit_expr(self, expr),
         }
     }
+}
+
+/// Checks the subqueries a select reads: SQL only, and a value of a related
+/// record of a field that reads as one value.
+struct CheckSelectSubqueries<'a, 'b, 'v> {
+    verify: &'b mut Verify<'a, 'v>,
+}
+
+impl stmt::Visit for CheckSelectSubqueries<'_, '_, '_> {
+    fn visit_expr(&mut self, expr: &stmt::Expr) {
+        let sql = self.verify.capability.sql();
+        match expr {
+            stmt::Expr::InSubquery(_) | stmt::Expr::Exists(_) if !sql => {
+                self.verify.record(Error::unsupported_feature(format!(
+                    "{} does not support selecting a relation predicate",
+                    self.verify.capability.driver_name
+                )));
+            }
+            stmt::Expr::Stmt(expr_stmt) => {
+                let Statement::Query(query) = &*expr_stmt.stmt else {
+                    return;
+                };
+                if !refers_to_enclosing_row(query) {
+                    return;
+                }
+                if sql {
+                    self.verify.verify_related_value_field(query);
+                } else {
+                    self.verify.record(Error::unsupported_feature(format!(
+                        "{} does not support selecting a value of a related record",
+                        self.verify.capability.driver_name
+                    )));
+                }
+            }
+            // The subqueries of a relation predicate are verified with
+            // their own query.
+            stmt::Expr::InSubquery(_) | stmt::Expr::Exists(_) => {}
+            _ => stmt::visit::visit_expr(self, expr),
+        }
+    }
+}
+
+/// The field paths a subquery reads from the row of the query it is used in,
+/// as paths of that query (at nesting 0).
+fn enclosing_row_paths(query: &stmt::Query) -> Vec<stmt::Expr> {
+    struct Collect {
+        /// The number of queries entered: a path at this nesting reads the
+        /// enclosing row.
+        depth: usize,
+        paths: Vec<stmt::Expr>,
+    }
+
+    impl stmt::Visit for Collect {
+        fn visit_stmt_query(&mut self, i: &stmt::Query) {
+            self.depth += 1;
+            stmt::visit::visit_stmt_query(self, i);
+            self.depth -= 1;
+        }
+
+        fn visit_expr(&mut self, expr: &stmt::Expr) {
+            if path_root_nesting(expr) == Some(self.depth) {
+                let mut path = expr.clone();
+                if let Some(nesting) = path_root_nesting_mut(&mut path) {
+                    *nesting = 0;
+                }
+                self.paths.push(path);
+                return;
+            }
+
+            stmt::visit::visit_expr(self, expr);
+        }
+    }
+
+    fn path_root_nesting(expr: &stmt::Expr) -> Option<usize> {
+        match expr {
+            stmt::Expr::Reference(stmt::ExprReference::Field { nesting, .. }) => Some(*nesting),
+            stmt::Expr::Project(project) => path_root_nesting(&project.base),
+            _ => None,
+        }
+    }
+
+    fn path_root_nesting_mut(expr: &mut stmt::Expr) -> Option<&mut usize> {
+        match expr {
+            stmt::Expr::Reference(stmt::ExprReference::Field { nesting, .. }) => Some(nesting),
+            stmt::Expr::Project(project) => path_root_nesting_mut(&mut project.base),
+            _ => None,
+        }
+    }
+
+    let mut collect = Collect {
+        depth: 0,
+        paths: vec![],
+    };
+    collect.visit_stmt_query(query);
+    collect.paths
 }
 
 /// Whether `expr` is a field path rooted at the current query's model.
@@ -997,12 +1179,12 @@ impl stmt::Visit for VerifyExpr<'_, '_> {
     fn visit_expr_stmt(&mut self, i: &stmt::ExprStmt) {
         // A query that refers to the row of the statement it is used in
         // (`Query::value_for`) is evaluated by the database only where it
-        // orders that statement.
+        // orders that statement or is read by its select.
         if let Statement::Query(query) = &*i.stmt
             && refers_to_enclosing_row(query)
         {
             self.record(Error::unsupported_feature(
-                "a value of a related record can only be used in order_by",
+                "a value of a related record can only be used in order_by or select",
             ));
             return;
         }
@@ -1084,7 +1266,7 @@ fn is_empty_record_returning(returning: &stmt::Returning) -> bool {
 }
 
 /// Whether `query` reads a field or column of an enclosing statement's row.
-fn refers_to_enclosing_row(query: &stmt::Query) -> bool {
+pub(super) fn refers_to_enclosing_row(query: &stmt::Query) -> bool {
     let mut found = false;
     stmt::visit::for_each_expr(query, |expr| {
         if let stmt::Expr::Reference(
@@ -1229,6 +1411,68 @@ mod tests {
         let expr = Expr::ilike(Expr::arg(0), Expr::arg(1));
         let err = verify_expr_with(&Capability::DYNAMODB, &expr)
             .expect("expected unsupported_feature error");
+        assert!(err.is_unsupported_feature());
+    }
+
+    /// A query of model 0 that selects `returning`.
+    fn select(returning: Expr) -> Statement {
+        let mut query = stmt::Query::new_select(ModelId(0), Expr::from(true));
+        query.body.as_select_mut_unwrap().returning = stmt::Returning::Project(returning);
+        Statement::Query(query)
+    }
+
+    /// A relation predicate's shape: `arg IN (SELECT ...)`.
+    fn relation_predicate() -> Expr {
+        Expr::in_subquery(
+            Expr::arg(0),
+            stmt::Query::new_select(ModelId(0), Expr::from(true)),
+        )
+    }
+
+    /// A value of a related record's shape: a single-row query whose filter
+    /// reads the enclosing row.
+    fn related_value() -> Expr {
+        let mut query = stmt::Query::new_select(
+            ModelId(0),
+            Expr::eq(
+                Expr::arg(0),
+                Expr::Reference(stmt::ExprReference::Field {
+                    nesting: 1,
+                    index: 0,
+                }),
+            ),
+        );
+        query.single = true;
+        query.body.as_select_mut_unwrap().returning = stmt::Returning::Project(Expr::arg(1));
+        Expr::stmt(query)
+    }
+
+    #[test]
+    fn selected_relation_predicate_rejected_on_ddb() {
+        let err = verify_with(
+            &Capability::DYNAMODB,
+            select(Expr::record([relation_predicate()])),
+        )
+        .expect_err("expected unsupported_feature error");
+        assert!(err.is_unsupported_feature());
+    }
+
+    #[test]
+    fn selected_relation_predicate_accepted_on_sqlite() {
+        verify_with(
+            &Capability::SQLITE,
+            select(Expr::record([relation_predicate()])),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn selected_related_value_rejected_on_ddb() {
+        let err = verify_with(
+            &Capability::DYNAMODB,
+            select(Expr::record([related_value()])),
+        )
+        .expect_err("expected unsupported_feature error");
         assert!(err.is_unsupported_feature());
     }
 

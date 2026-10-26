@@ -242,8 +242,9 @@ impl NestedMergePlanner<'_> {
 
         let mut fields = vec![];
 
-        for select_item in stmt_state.load_data_select_items.get().unwrap() {
-            fields.push(select_item.infer_ty(&cx));
+        let selection = stmt_state.load_data_select_items.get().unwrap();
+        for select_item in selection {
+            fields.push(select_item.infer_ty(&cx, selection.inline()));
         }
 
         stmt::Type::Record(fields)

@@ -591,6 +591,10 @@ produces a filter expression on the parent (`User`).
 relation to filter by the opposite endpoint, or on the direct join-model
 relation to filter by fields stored on the connection.
 
+On SQL databases, the expression `.any()` builds can also be read as a `bool`
+column with `.select(...)`; see [reading a value of a related
+record](./sorting-limits-and-pagination.md#reading-a-value-of-a-related-record).
+
 ### `all` — every related record matches
 
 `.all()` on a `HasMany` path is the universal counterpart to `.any()`:

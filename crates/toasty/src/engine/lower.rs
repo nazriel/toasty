@@ -31,7 +31,9 @@ use toasty_core::{
     stmt::{self, IntoExprTarget, VisitMut, visit_mut},
 };
 
-use crate::engine::{Engine, HirStatement, hir, simplify::Simplify, upsert};
+use crate::engine::{
+    Engine, HirStatement, hir, simplify::Simplify, upsert, verify::refers_to_enclosing_row,
+};
 
 /// Wrap a nullable single-relation subquery so a missing row passes through as
 /// `Null`, while a present row is transformed by `present`. Used when lowering
@@ -1045,6 +1047,16 @@ impl visit_mut::VisitMut for LowerStatement<'_, '_> {
                 stmt::visit_mut::visit_expr_mut(self, expr);
                 lower_aggregate_arg(expr);
             }
+            // A value of a related record (`Query::value_for`) read by the
+            // returning clause is a correlated scalar subquery that a SQL
+            // database evaluates for each row, so it stays in the statement.
+            stmt::Expr::Stmt(expr_stmt)
+                if self.capability().sql()
+                    && self.cx.is_returning()
+                    && is_related_value(expr_stmt) =>
+            {
+                self.lower_related_value(expr);
+            }
             stmt::Expr::Stmt(_) => {
                 let stmt::Expr::Stmt(mut expr_stmt) = expr.take() else {
                     panic!()
@@ -1867,6 +1879,47 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
         *value = stmt::Expr::record([lhs]);
     }
 
+    /// Lowers a value of a related record that the returning clause reads
+    /// (see [`is_related_value`]) to a scalar subquery that the database
+    /// evaluates for each row, its references to the enclosing row kept as
+    /// column references. The value is decoded: a field stored in another
+    /// type than its own lowers to a decode cast, which moves outside the
+    /// subquery as it does outside an aggregate.
+    fn lower_related_value(&mut self, expr: &mut stmt::Expr) {
+        let stmt::Expr::Stmt(expr_stmt) = expr else {
+            unreachable!("not a subquery: {expr:#?}")
+        };
+        let stmt::Statement::Query(query) = &mut *expr_stmt.stmt else {
+            unreachable!("not a query: {expr_stmt:#?}")
+        };
+
+        self.inline_depth += 1;
+        self.visit_stmt_query_mut(query);
+        self.inline_depth -= 1;
+
+        let stmt::ExprSet::Select(select) = &mut query.body else {
+            return;
+        };
+        let stmt::Returning::Project(value) = &mut select.returning else {
+            return;
+        };
+        let decode = match value {
+            stmt::Expr::Cast(cast) => {
+                let ty = cast.ty.clone();
+                *value = cast.expr.take();
+                Some(ty)
+            }
+            _ => None,
+        };
+
+        // SQL projects a record of columns: the subquery selects one.
+        *value = stmt::Expr::record([value.take()]);
+
+        if let Some(ty) = decode {
+            *expr = stmt::Expr::cast(expr.take(), ty);
+        }
+    }
+
     fn lower_expr_field(&self, nesting: usize, index: usize) -> stmt::Expr {
         match self.cx {
             LoweringContext::Statement
@@ -2341,6 +2394,24 @@ fn lower_aggregate_arg(expr: &mut stmt::Expr) {
     if decodes_result {
         *expr = stmt::Expr::cast(expr.take(), ty);
     }
+}
+
+/// Whether a subquery, before lowering, is a value of a related record
+/// (`Query::value_for`): a single-row query that projects one value and
+/// refers to the enclosing statement's row. Relation fields projected by
+/// `select(...)` and includes are lowered from field references, never from
+/// such a subquery.
+fn is_related_value(expr_stmt: &stmt::ExprStmt) -> bool {
+    let stmt::Statement::Query(query) = &*expr_stmt.stmt else {
+        return false;
+    };
+    let stmt::ExprSet::Select(select) = &query.body else {
+        return false;
+    };
+
+    query.single
+        && matches!(&select.returning, stmt::Returning::Project(value) if !value.is_record())
+        && refers_to_enclosing_row(query)
 }
 
 fn expr_is_enum_decode(expr: &stmt::Expr) -> bool {

@@ -183,6 +183,20 @@ fn refine_query(query: &stmt::Query, cx: &Cx<'_>, params: &mut [Param]) {
     match &query.body {
         stmt::ExprSet::Select(select) => {
             refine_filter(&select.filter, &cx, params);
+
+            // A subquery in the SELECT list (a relation predicate, or a
+            // value of a related record) shares the query's scope; its
+            // comparisons need the same refinement as the filter's.
+            if let stmt::Returning::Project(stmt::Expr::Record(record)) = &select.returning {
+                for item in &record.fields {
+                    if matches!(
+                        item,
+                        stmt::Expr::InSubquery(_) | stmt::Expr::Exists(_) | stmt::Expr::Stmt(_)
+                    ) {
+                        synthesize(item, &cx, params);
+                    }
+                }
+            }
         }
         stmt::ExprSet::Values(values) => {
             for row in &values.rows {

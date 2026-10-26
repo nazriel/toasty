@@ -485,6 +485,18 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
                     *expr = stmt::Expr::arg_project(0, [index]);
                     false
                 }
+                _ if is_returning_projection && is_inline_subquery(expr) => {
+                    let selection = self.stmt_info.load_data_select_items.get().unwrap();
+                    // Only SQL selects a subquery; elsewhere its parts are
+                    // rewritten as any other expression's.
+                    let Some(item) = selection.find_inline(expr) else {
+                        return true;
+                    };
+                    let index = selection.get_index_of(&item).unwrap();
+                    reads_row = true;
+                    *expr = stmt::Expr::arg_project(0, [index]);
+                    false
+                }
                 _ => true,
             }
         });
@@ -516,13 +528,24 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
     fn extract_columns_from_returning(&mut self, returning: &Returning) {
         /// Collects the items a returning clause reads. An aggregate is one
         /// item: the column inside it is aggregated by the database, not
-        /// selected.
-        struct CollectSelectItems<'a>(&'a mut SelectItems);
+        /// selected. On SQL, a subquery left in the returning (a relation
+        /// predicate, or a correlated scalar subquery) is one item too: the
+        /// database evaluates it per row, and the columns inside it belong to
+        /// its own scope.
+        struct CollectSelectItems<'a> {
+            items: &'a mut SelectItems,
+            sql: bool,
+        }
 
         impl stmt::Visit for CollectSelectItems<'_> {
             fn visit_expr(&mut self, expr: &stmt::Expr) {
                 if let Some(item) = SelectItem::from_aggregate(expr) {
-                    self.0.insert(item);
+                    self.items.insert(item);
+                    return;
+                }
+
+                if self.sql && is_inline_subquery(expr) {
+                    self.items.insert_inline(expr);
                     return;
                 }
 
@@ -531,7 +554,7 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
                         expr_reference.is_column(),
                         "TODO: expr_reference = {expr_reference:#?}"
                     );
-                    self.0.insert((*expr_reference).into());
+                    self.items.insert((*expr_reference).into());
                 }
 
                 stmt::visit::visit_expr(self, expr);
@@ -540,7 +563,10 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
 
         if let Some(returning) = returning {
             stmt::Visit::visit_returning(
-                &mut CollectSelectItems(&mut self.load_data.select_items),
+                &mut CollectSelectItems {
+                    items: &mut self.load_data.select_items,
+                    sql: self.planner.engine.capability().sql(),
+                },
                 returning,
             );
         }
@@ -1002,10 +1028,7 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
                 );
             } else {
                 stmt.set_returning_project(stmt::Expr::record(
-                    self.load_data
-                        .select_items
-                        .iter()
-                        .map(|item| item.to_expr()),
+                    self.load_data.select_items.to_exprs(),
                 ));
             }
         }
@@ -1137,12 +1160,7 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
 
         // Set returning clause with all columns (including added ORDER BY columns)
         if !self.load_data.select_items.is_empty() {
-            stmt.set_returning_project(stmt::Expr::record(
-                self.load_data
-                    .select_items
-                    .iter()
-                    .map(|item| item.to_expr()),
-            ));
+            stmt.set_returning_project(stmt::Expr::record(self.load_data.select_items.to_exprs()));
         }
 
         let input_args: Vec<_> = self
@@ -2475,6 +2493,18 @@ fn as_i64_literal(expr: &stmt::Expr) -> i64 {
         stmt::Expr::Value(stmt::Value::I64(n)) | stmt::Expr::Static(stmt::Value::I64(n)) => *n,
         _ => panic!("limit/offset must be an i64 literal; got {expr:#?}"),
     }
+}
+
+/// Whether `expr`, in a lowered returning clause, is a subquery the database
+/// evaluates for each row: a relation predicate (`IN (SELECT ...)`,
+/// `EXISTS (...)`) or a correlated scalar subquery (`Query::value_for`).
+/// Lowering turns every other subquery of a returning into a statement of
+/// its own.
+fn is_inline_subquery(expr: &stmt::Expr) -> bool {
+    matches!(
+        expr,
+        stmt::Expr::InSubquery(_) | stmt::Expr::Exists(_) | stmt::Expr::Stmt(_)
+    )
 }
 
 /// Extract the sort direction from a query statement's ORDER BY clause for use

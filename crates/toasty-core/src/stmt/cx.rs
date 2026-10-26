@@ -607,7 +607,20 @@ impl<'a, T: Resolve> ExprContext<'a, T> {
             // could be any type. Return Unknown so it unifies with whatever
             // the other branches produce.
             Expr::Error(_) => Type::Unknown,
-            Expr::Exists(_) => Type::Bool,
+            Expr::Exists(_) | Expr::InSubquery(_) => Type::Bool,
+            // A scalar subquery: the value its row projects, `NULL` when no
+            // row matches. SQL projects a record of columns; the subquery
+            // selects one.
+            Expr::Stmt(expr_stmt) => {
+                let Statement::Query(query) = &*expr_stmt.stmt else {
+                    todo!("type of a mutation used as a scalar; expr={expr:#?}")
+                };
+                let cx = self.scope(query);
+                match cx.infer_returning_ty2(query.returning_unwrap(), args, true) {
+                    Type::Record(mut fields) if fields.len() == 1 => fields.pop().unwrap(),
+                    ty => ty,
+                }
+            }
             Expr::Func(ExprFunc::Count(_)) => Type::U64,
             Expr::Func(ExprFunc::Aggregate(func)) => match func.func {
                 super::AggregateFunc::Avg => Type::F64,

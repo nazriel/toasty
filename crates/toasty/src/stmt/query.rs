@@ -736,13 +736,15 @@ impl<M: Model> Query<List<M>> {
     /// The result is a correlated scalar subquery, `(SELECT field FROM ...
     /// WHERE key = outer AND <this query's filter>)`, which can be passed to
     /// [`Expr::asc`] or [`Expr::desc`] to order the enclosing query by a
-    /// value stored in another table. Every value in the filter is a bound
-    /// parameter, so the record to read can be chosen at run time. The
+    /// value stored in another table, or to `select(...)` to read it with
+    /// the enclosing record's own fields. Every value in the filter is a
+    /// bound parameter, so the record to read can be chosen at run time. The
     /// filter must select at most one record for each enclosing record; when
     /// it selects more, SQLite reads the first it finds, while PostgreSQL and
     /// MySQL fail the query.
     ///
-    /// Supported on SQL databases, in `order_by`.
+    /// Supported on SQL databases, in `order_by` and `select`. A selected
+    /// `field` must be a field that is neither nullable nor an embedded type.
     ///
     /// # Examples
     ///

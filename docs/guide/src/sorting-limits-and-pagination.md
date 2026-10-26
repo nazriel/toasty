@@ -200,6 +200,75 @@ Sorting by a related value works on SQL databases with `.limit()` and
 to read the next cursor from, nor in a filter, nor on DynamoDB; each of these
 is rejected with an unsupported-feature error.
 
+### Reading a value of a related record
+
+The same value can be read with `.select(...)`, next to the record's own
+fields, as an `Option`: `None` for a record without a match. A relation
+predicate such as `.any(...)` reads as a `bool` the same way. Both are
+subqueries in the statement's `SELECT` list, so the query is still one
+statement:
+
+```rust
+# use toasty::Model;
+# #[derive(Debug, toasty::Model)]
+# struct User {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     name: String,
+#     #[has_many]
+#     settings: toasty::Deferred<Vec<Setting>>,
+# }
+# #[derive(Debug, toasty::Model)]
+# struct Setting {
+#     #[key]
+#     #[auto]
+#     id: u64,
+#     #[index]
+#     user_id: u64,
+#     #[belongs_to(key = user_id, references = id)]
+#     user: toasty::Deferred<User>,
+#     key: String,
+#     value: String,
+# }
+# async fn __example(mut db: toasty::Db) -> toasty::Result<()> {
+use toasty::stmt::{List, Query};
+
+let theme = Query::<List<Setting>>::all()
+    .filter(Setting::fields().key().eq("theme"))
+    .value_for(
+        Setting::fields().value(),
+        Setting::fields().user_id(),
+        User::fields().id(),
+    );
+let has_settings = User::fields()
+    .settings()
+    .any(Setting::fields().key().ne(""));
+
+// Each user's name, theme and whether they have any setting
+let rows: Vec<(String, Option<String>, bool)> = User::all()
+    .select((User::fields().name(), theme, has_settings))
+    .exec(&mut db)
+    .await?;
+# Ok(())
+# }
+```
+
+```sql
+SELECT name,
+       (SELECT value FROM settings WHERE user_id = users.id AND key = $1),
+       id IN (SELECT user_id FROM settings WHERE key <> $2)
+FROM users
+```
+
+A selected value must be a non-nullable field that is not an embedded type:
+a nullable field would read as `Option<Option<T>>`, and an embedded type
+spans several columns; both are rejected with an unsupported-feature error.
+In a query with `.group_by(...)`, a related value is read when the field it
+matches (`User::fields().id()` above) is a grouping key, and `.any(...)` is
+not read. Selecting either is SQL-only; DynamoDB rejects it with an
+unsupported-feature error.
+
 ## Limiting results
 
 `.limit(n)` caps the number of records returned:
