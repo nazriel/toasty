@@ -39,3 +39,40 @@ fn non_const_base_not_simplified() {
 
     assert!(result.is_none());
 }
+
+#[test]
+fn const_base_with_field_projection_mixing_nulls() {
+    let schema = test_schema();
+    let simplify = Simplify::new(&schema, &toasty_core::driver::Capability::SQLITE);
+
+    // `map([(1, a), (null, b)], x => x.0) → [1, null]`, though the records
+    // have no single type
+    let mut expr = Expr::map(
+        Expr::Value(Value::List(vec![
+            Value::record_from_vec(vec![Value::from(1i64), Value::from("a")]),
+            Value::record_from_vec(vec![Value::Null, Value::from("b")]),
+        ])),
+        Expr::arg_project(0, [0]),
+    );
+    let result = simplify.simplify_expr_map(&mut expr);
+
+    assert_eq!(
+        result,
+        Some(Expr::Value(Value::List(vec![
+            Value::from(1i64),
+            Value::Null
+        ])))
+    );
+}
+
+#[test]
+fn empty_base_with_field_projection() {
+    let schema = test_schema();
+    let simplify = Simplify::new(&schema, &toasty_core::driver::Capability::SQLITE);
+
+    // `map([], x => x.0) → []`
+    let mut expr = Expr::map(Expr::Value(Value::List(vec![])), Expr::arg_project(0, [0]));
+    let result = simplify.simplify_expr_map(&mut expr);
+
+    assert_eq!(result, Some(Expr::Value(Value::List(vec![]))));
+}

@@ -246,7 +246,7 @@ impl Simplify<'_> {
 
     /// Returns `true` if `expr` is a column reference that resolves to a
     /// derived VALUES table where every row has NULL at the referenced column.
-    fn is_always_null_derived_column(&self, expr: &Expr) -> bool {
+    pub(super) fn is_always_null_derived_column(&self, expr: &Expr) -> bool {
         let Expr::Reference(expr_ref) = expr else {
             return false;
         };

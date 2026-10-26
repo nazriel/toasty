@@ -709,6 +709,12 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
     }
 
     fn rewrite_stmt_query_for_batch_load_sql(&mut self, stmt: &mut stmt::Statement) {
+        if let Some(filter) = stmt.filter_expr_mut()
+            && self.rewrite_batch_load_filter_as_key_set(filter)
+        {
+            return;
+        }
+
         // If targeting SQL, leverage the SQL query engine to handle most of the rewrite details.
         let mut filter = stmt
             .filter_mut()
@@ -773,6 +779,128 @@ impl<'a, 'b> PlanStatement<'a, 'b> {
         };
 
         stmt.filter_mut_unwrap().set(stmt::Expr::exists(sub_query));
+    }
+
+    /// Rewrites a batch-load filter whose only reference to the batch is one
+    /// equality between a column and one batch column (`col = <key>`, ANDed
+    /// with conditions that do not read the batch) into a membership test the
+    /// database can answer from an index on `col`:
+    ///
+    /// * `col = ANY(<keys>)`, the keys bound as one array parameter, where the
+    ///   dialect has `= ANY` and the driver binds a list as one parameter;
+    /// * `col IN (SELECT column<k> FROM (VALUES ...))` on SQLite, which plans
+    ///   the correlated `EXISTS` as a scan of the whole table.
+    ///
+    /// Returns `false`, leaving the filter untouched, for any other filter (a
+    /// composite key, a batch column read more than once or outside that
+    /// equality, more than one batch) and on other backends, which keep the
+    /// correlated `EXISTS`.
+    fn rewrite_batch_load_filter_as_key_set(&self, filter: &mut stmt::Expr) -> bool {
+        enum KeySet {
+            AnyArray,
+            InValues,
+        }
+
+        let capability = self.planner.engine.capability();
+        let key_set = if capability.predicate_match_any && capability.bind_list_param {
+            KeySet::AnyArray
+        } else if capability.sql == Some(Dialect::Sqlite) {
+            KeySet::InValues
+        } else {
+            return false;
+        };
+
+        if self.load_data.batch_load_args.len() != 1 {
+            return false;
+        }
+
+        // Every arg in a batch-load filter reads the batch.
+        let mut batch_reads = 0;
+        stmt::visit::for_each_expr(&*filter, |expr| {
+            if let stmt::Expr::Arg(_) = expr {
+                batch_reads += 1;
+            }
+        });
+
+        if batch_reads != 1 {
+            return false;
+        }
+
+        let operands = match filter {
+            stmt::Expr::And(and) => &mut and.operands[..],
+            expr => std::slice::from_mut(expr),
+        };
+
+        let Some(operand) = operands.iter_mut().find(|operand| {
+            let stmt::Expr::BinaryOp(binary_op) = operand else {
+                return false;
+            };
+            binary_op.op == stmt::BinaryOp::Eq
+                && matches!(
+                    (&*binary_op.lhs, &*binary_op.rhs),
+                    (stmt::Expr::Arg(_), column) | (column, stmt::Expr::Arg(_))
+                        if is_local_column(column)
+                )
+        }) else {
+            return false;
+        };
+
+        let stmt::Expr::BinaryOp(binary_op) = operand.take() else {
+            unreachable!()
+        };
+        let (column, expr_arg) = match (*binary_op.lhs, *binary_op.rhs) {
+            (stmt::Expr::Arg(expr_arg), column) | (column, stmt::Expr::Arg(expr_arg)) => {
+                (column, expr_arg)
+            }
+            _ => unreachable!(),
+        };
+
+        let hir::Arg::Ref {
+            stmt_id: target_id,
+            target_expr_ref,
+            batch_load_index,
+            ..
+        } = &self.stmt_info.args[expr_arg.position]
+        else {
+            unreachable!("batch-load filter arg is a ref")
+        };
+
+        let back_ref = &self.planner.hir[target_id].back_refs[&self.stmt_id];
+        let key = back_ref.exprs.get_index_of(target_expr_ref).unwrap();
+        let input = self.load_data.batch_load_args[0];
+
+        *operand = match key_set {
+            KeySet::AnyArray => stmt::Expr::any_op(
+                column,
+                stmt::BinaryOp::Eq,
+                stmt::Expr::map(stmt::Expr::arg(input), stmt::Expr::arg_project(0, [key])),
+            ),
+            KeySet::InValues => stmt::Expr::in_subquery(
+                column,
+                stmt::Select {
+                    returning: stmt::Returning::Project(stmt::Expr::record([stmt::Expr::column(
+                        stmt::ExprColumn {
+                            nesting: 0,
+                            table: batch_load_index.get().unwrap(),
+                            column: key,
+                        },
+                    )])),
+                    source: stmt::Source::Table(stmt::SourceTable {
+                        tables: vec![stmt::TableRef::Arg(stmt::ExprArg::new(input))],
+                        from: vec![stmt::TableWithJoins {
+                            relation: stmt::TableFactor::Table(stmt::SourceTableId(0)),
+                            joins: vec![],
+                        }],
+                    }),
+                    filter: stmt::Filter::ALL,
+                    distinct: false,
+                    group_by: vec![],
+                    having: None,
+                },
+            ),
+        };
+
+        true
     }
 
     fn rewrite_stmt_query_for_batch_load_nosql(&mut self, stmt: &mut stmt::Statement) {
@@ -2504,6 +2632,15 @@ fn is_inline_subquery(expr: &stmt::Expr) -> bool {
     matches!(
         expr,
         stmt::Expr::InSubquery(_) | stmt::Expr::Exists(_) | stmt::Expr::Stmt(_)
+    )
+}
+
+/// Whether `expr` reads a column of the statement's own source (not of an
+/// enclosing query).
+fn is_local_column(expr: &stmt::Expr) -> bool {
+    matches!(
+        expr,
+        stmt::Expr::Reference(stmt::ExprReference::Column(expr_column)) if expr_column.nesting == 0
     )
 }
 

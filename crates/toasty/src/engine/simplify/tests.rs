@@ -2,9 +2,11 @@ pub use crate::engine::test_util::*;
 
 mod expr_and;
 mod expr_any;
+mod expr_any_op;
 mod expr_binary_op;
 mod expr_cast;
 mod expr_exists;
+mod expr_in_subquery;
 mod expr_intersects;
 mod expr_is_null;
 mod expr_is_superset;
