@@ -365,11 +365,52 @@ fn expr_in_subquery() {
     let schema = users_schema();
     let in_sub = Expr::in_subquery(col(0, 0), select_id_from_users());
 
-    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" IN (SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0);"#]].assert_eq(&render_postgresql(
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" IN (SELECT tbl_1_0."id" AS column1 FROM "users" AS tbl_1_0);"#]].assert_eq(&render_postgresql(
         &schema,
         select_users_with_filter(in_sub.clone()),
     ));
-    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" IN (SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0);"#]].assert_eq(&render_sqlite(&schema, select_users_with_filter(in_sub)));
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" IN (SELECT tbl_1_0."id" AS column1 FROM "users" AS tbl_1_0);"#]].assert_eq(&render_sqlite(&schema, select_users_with_filter(in_sub)));
+}
+
+#[test]
+fn expr_in_subquery_correlated_with_the_outer_query() {
+    let schema = Schema {
+        tables: vec![
+            make_table(0, "users", &[]),
+            make_table(1, "settings", &["user_id"]),
+        ],
+    };
+
+    // `SELECT id FROM users WHERE id IN (SELECT user_id FROM settings WHERE
+    // settings.user_id = users.id)`: the subquery reads the outer row at
+    // nesting 1 and its own table at nesting 0.
+    let settings = Source::Table(SourceTable {
+        tables: vec![TableRef::Table(TableId(1))],
+        from: vec![TableWithJoins {
+            relation: TableFactor::Table(SourceTableId(0)),
+            joins: vec![],
+        }],
+    });
+    let outer_id = Expr::column(ExprColumn {
+        nesting: 1,
+        table: 0,
+        column: 0,
+    });
+    let subquery = Select {
+        returning: Returning::Project(Expr::record([col(0, 1)])),
+        source: settings,
+        filter: Filter::from(Expr::eq(col(0, 1), outer_id)),
+        distinct: false,
+        group_by: vec![],
+        having: None,
+    };
+    let in_sub = Expr::in_subquery(col(0, 0), stmt::Query::builder(subquery).build());
+
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" IN (SELECT tbl_1_0."user_id" AS column1 FROM "settings" AS tbl_1_0 WHERE tbl_1_0."user_id" = tbl_0_0."id");"#]].assert_eq(&render_postgresql(
+        &schema,
+        select_users_with_filter(in_sub.clone()),
+    ));
+    expect![[r#"SELECT tbl_0_0."id" AS column1 FROM "users" AS tbl_0_0 WHERE tbl_0_0."id" IN (SELECT tbl_1_0."user_id" AS column1 FROM "settings" AS tbl_1_0 WHERE tbl_1_0."user_id" = tbl_0_0."id");"#]].assert_eq(&render_sqlite(&schema, select_users_with_filter(in_sub)));
 }
 
 // -----------------------------------------------------------------------------

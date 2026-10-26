@@ -142,7 +142,10 @@ impl ToSql for &stmt::Expr {
             }
             stmt::Expr::InSubquery(expr) => {
                 let op = if expr.negated { " NOT IN (" } else { " IN (" };
-                fmt!(f, expr.expr op expr.query ")");
+                fmt!(f, expr.expr op);
+                f.depth += 1;
+                fmt!(f, expr.query ")");
+                f.depth -= 1;
             }
             stmt::Expr::IsNull(expr) => {
                 let op = if expr.negated {

@@ -115,7 +115,7 @@ fn batch_load_in_values_sqlite() {
     let key_set = select(Expr::record([col(0, 0, 0)]), source(keys()), Filter::ALL);
     let filter = Expr::in_subquery(col(0, 0, 1), key_set);
 
-    expect![[r#"SELECT tbl_0_0."id" AS column1, tbl_0_0."parent_id" AS column2 FROM "children" AS tbl_0_0 WHERE tbl_0_0."parent_id" IN (SELECT tbl_0_0.column1 AS column1 FROM (VALUES (?1), (?2)) AS tbl_0_0);"#]]
+    expect![[r#"SELECT tbl_0_0."id" AS column1, tbl_0_0."parent_id" AS column2 FROM "children" AS tbl_0_0 WHERE tbl_0_0."parent_id" IN (SELECT tbl_1_0.column1 AS column1 FROM (VALUES (?1), (?2)) AS tbl_1_0);"#]]
         .assert_eq(&Serializer::sqlite(&schema).serialize(&SqlStatement::from(load_children(filter))));
 }
 
