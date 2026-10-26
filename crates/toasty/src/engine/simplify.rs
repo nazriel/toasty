@@ -48,6 +48,71 @@ impl Engine {
     }
 }
 
+/// Folds an insert whose rows are literals and returns whether that was all
+/// the simplification it needed.
+///
+/// An insert of literal rows, with at most casts around the literals and in
+/// the returning value, has only constants for [`Simplify`] to evaluate, and
+/// folding does that without the walk's scopes and without folding every
+/// subtree again at each node. When anything but a literal is left (a
+/// relation, a nested create, an upsert), the statement is only folded and
+/// the caller runs the full pass.
+pub(crate) fn fold_literal_insert(stmt: &mut stmt::Statement) -> bool {
+    let stmt::Statement::Insert(insert) = stmt else {
+        return false;
+    };
+
+    if !is_literal_insert(insert, true) {
+        return false;
+    }
+
+    fold::fold_stmt(insert);
+    is_literal_insert(insert, false)
+}
+
+/// Whether an insert into a model or a table has nothing to simplify but
+/// constants: no upsert, CTE, ordering, limit or included relation, and VALUES
+/// rows and a returning value made of literals, `DEFAULT`s and records of
+/// them (and, when `casts` is set, casts around those).
+fn is_literal_insert(insert: &stmt::Insert, casts: bool) -> bool {
+    fn is_literal(expr: &Expr, casts: bool) -> bool {
+        match expr {
+            Expr::Value(_) | Expr::Default => true,
+            Expr::Cast(cast) => casts && cast.from.is_none() && is_literal(&cast.expr, casts),
+            Expr::Record(record) => record.fields.iter().all(|field| is_literal(field, casts)),
+            _ => false,
+        }
+    }
+
+    if !matches!(
+        insert.target,
+        stmt::InsertTarget::Model(_) | stmt::InsertTarget::Table(_)
+    ) {
+        return false;
+    }
+
+    if insert.upsert.is_some()
+        || insert.source.with.is_some()
+        || insert.source.order_by.is_some()
+        || insert.source.limit.is_some()
+    {
+        return false;
+    }
+
+    let stmt::ExprSet::Values(values) = &insert.source.body else {
+        return false;
+    };
+
+    let returning_is_literal = match &insert.returning {
+        None | Some(stmt::Returning::Changed) => true,
+        Some(stmt::Returning::Model { include }) => include.is_empty(),
+        Some(stmt::Returning::Expr(expr)) => is_literal(expr, casts),
+        Some(stmt::Returning::Project(_)) => false,
+    };
+
+    returning_is_literal && values.rows.iter().all(|row| is_literal(row, casts))
+}
+
 /// Simplifies an expression in place using the given context and capability.
 pub(crate) fn simplify_expr(
     cx: stmt::ExprContext<'_>,

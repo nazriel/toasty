@@ -32,7 +32,10 @@ use toasty_core::{
 };
 
 use crate::engine::{
-    Engine, HirStatement, hir, simplify::Simplify, upsert, verify::refers_to_enclosing_row,
+    Engine, HirStatement, hir,
+    simplify::{self, Simplify},
+    upsert,
+    verify::refers_to_enclosing_row,
 };
 
 /// Wrap a nullable single-relation subquery so a missing row passes through as
@@ -113,7 +116,9 @@ impl LoweringState<'_> {
 
         // Combine compatible IN subqueries after relation lifting and before
         // the lowering walk extracts them into separate NoSQL statements.
-        Simplify::with_context(expr_cx, self.engine.capability).visit_mut(&mut stmt);
+        if !simplify::fold_literal_insert(&mut stmt) {
+            Simplify::with_context(expr_cx, self.engine.capability).visit_mut(&mut stmt);
+        }
 
         let stmt_id = self.hir.new_statement_info(
             self.dependencies
@@ -135,7 +140,9 @@ impl LoweringState<'_> {
         }
         .visit_stmt_mut(&mut stmt);
 
-        self.engine.simplify_stmt(&mut stmt);
+        if !simplify::fold_literal_insert(&mut stmt) {
+            self.engine.simplify_stmt(&mut stmt);
+        }
 
         let stmt_info = &mut self.hir[stmt_id];
         stmt_info.stmt = Some(Box::new(stmt));
