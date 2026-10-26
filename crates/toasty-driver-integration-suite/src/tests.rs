@@ -111,6 +111,7 @@ pub mod relation_preload;
 pub mod relation_preload_batch_keys;
 pub mod relation_preload_filter;
 pub mod relation_preload_options;
+pub mod relation_signed_key;
 pub mod relation_via_mutation_runtime_error;
 pub mod scan_no_index;
 pub mod select_projection;

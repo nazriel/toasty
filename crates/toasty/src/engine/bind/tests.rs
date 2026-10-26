@@ -496,6 +496,40 @@ fn merge_column_wins_over_inferred() {
     assert!(result.is_column(), "expected Column, got {:?}", result);
 }
 
+#[test]
+fn merge_integer_columns_of_different_widths_takes_the_wider() {
+    use super::infer::merge;
+
+    let narrow = Ty::Column(db::Type::Integer(4));
+    let wide = Ty::Column(db::Type::Integer(8));
+    for result in [merge(&narrow, &wide), merge(&wide, &narrow)] {
+        assert!(
+            matches!(result, Ty::Column(db::Type::Integer(8))),
+            "expected Column(Integer(8)), got {result:?}"
+        );
+    }
+
+    let narrow = Ty::Column(db::Type::UnsignedInteger(4));
+    let wide = Ty::Column(db::Type::UnsignedInteger(8));
+    for result in [merge(&narrow, &wide), merge(&wide, &narrow)] {
+        assert!(
+            matches!(result, Ty::Column(db::Type::UnsignedInteger(8))),
+            "expected Column(UnsignedInteger(8)), got {result:?}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "disagree")]
+fn merge_signed_and_unsigned_integer_columns_panics() {
+    use super::infer::merge;
+
+    merge(
+        &Ty::Column(db::Type::Integer(8)),
+        &Ty::Column(db::Type::UnsignedInteger(8)),
+    );
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================

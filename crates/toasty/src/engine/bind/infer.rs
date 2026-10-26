@@ -477,6 +477,18 @@ pub(super) fn merge(a: &Ty, b: &Ty) -> Ty {
     match (a, b) {
         (Ty::Unknown, other) | (other, Ty::Unknown) => other.clone(),
 
+        // Two integer columns of one signedness in different widths, e.g. an
+        // auto-increment key SQLite stores narrower than its foreign key.
+        // They compare as integers; a param takes the wider width, which
+        // holds the values of both.
+        (Ty::Column(db::Type::Integer(a_size)), Ty::Column(db::Type::Integer(b_size))) => {
+            Ty::Column(db::Type::Integer(*a_size.max(b_size)))
+        }
+        (
+            Ty::Column(db::Type::UnsignedInteger(a_size)),
+            Ty::Column(db::Type::UnsignedInteger(b_size)),
+        ) => Ty::Column(db::Type::UnsignedInteger(*a_size.max(b_size))),
+
         // Both are scalars — column provenance wins
         (Ty::Column(a_ty), Ty::Column(b_ty)) => {
             assert_eq!(

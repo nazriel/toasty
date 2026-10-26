@@ -1682,6 +1682,17 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
                 }
 
                 let target_ty = self.capability().native_type_for(&expr_cast.ty);
+
+                // The database compares the decoded type natively, e.g. an
+                // `i64` key that SQLite stores in a narrower `INTEGER`. Both
+                // sides compare as stored, and the side without a decode
+                // already has the target type: it needs no cast.
+                if target_ty == expr_cast.ty {
+                    strip_decode_cast(lhs);
+                    strip_decode_cast(rhs);
+                    return None;
+                }
+
                 self.cast_expr(lhs, &target_ty);
                 self.cast_expr(rhs, &target_ty);
                 None
@@ -1699,6 +1710,12 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             return;
         };
         let target_ty = self.capability().native_type_for(&expr_cast.ty);
+        if target_ty == expr_cast.ty {
+            strip_decode_cast(&mut e.expr);
+            strip_decode_cast(&mut e.low);
+            strip_decode_cast(&mut e.high);
+            return;
+        }
         self.cast_expr(&mut e.expr, &target_ty);
         self.cast_expr(&mut e.low, &target_ty);
         self.cast_expr(&mut e.high, &target_ty);
@@ -1801,6 +1818,12 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
             unreachable!()
         };
         let target_ty = self.capability().native_type_for(&cast.ty);
+
+        // As in a binary comparison: the items already have the target type.
+        if target_ty == cast.ty {
+            strip_decode_cast(expr);
+            return;
+        }
 
         self.cast_expr(expr, &target_ty);
 
@@ -2337,7 +2360,13 @@ impl<'a, 'b> LowerStatement<'a, 'b> {
                 let base = expr.take();
                 *expr = stmt::Expr::cast(base, target_ty.clone());
             }
-            _ => todo!("cast_expr: cannot cast {expr:#?} to {target_ty:?}"),
+            _ => {
+                self.state
+                    .errors
+                    .push(crate::Error::unsupported_feature(format!(
+                        "a comparison operand cannot be cast to {target_ty:?}"
+                    )));
+            }
         }
     }
 }
@@ -2441,6 +2470,15 @@ fn collapse_projections(mut expr: stmt::Expr) -> stmt::Expr {
         expr = entry.to_expr();
     }
     expr
+}
+
+/// Removes a column's decode cast from one side of a comparison, as
+/// `cast_expr` does, and leaves any other expression unchanged.
+fn strip_decode_cast(expr: &mut stmt::Expr) {
+    *expr = collapse_projections(expr.take());
+    if let stmt::Expr::Cast(expr_cast) = expr {
+        *expr = expr_cast.expr.take();
+    }
 }
 
 /// The payload of a lowered enum value as the variant with discriminant

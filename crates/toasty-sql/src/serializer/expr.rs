@@ -262,9 +262,61 @@ impl ToSql for &stmt::Expr {
                 // SQLite does not support the DEFAULT keyword but NULL acts similarly.
                 Dialect::Sqlite => fmt!(f, "NULL"),
             },
+            // An integer column read as an integer of another width, e.g. an
+            // auto-increment key that SQLite stores narrower than the foreign
+            // keys referencing it. SQLite keeps every width in one `INTEGER`,
+            // so the column compares as stored; elsewhere the cast is explicit.
+            stmt::Expr::Cast(expr_cast)
+                if let Some(ty) = integer_cast_ty(&expr_cast.ty)
+                    && is_integer_column(f, &expr_cast.expr) =>
+            {
+                match f.serializer.dialect {
+                    Dialect::Sqlite => fmt!(f, expr_cast.expr),
+                    Dialect::Postgresql => {
+                        let ty = &ty;
+                        fmt!(f, "CAST(" expr_cast.expr " AS " ty ")")
+                    }
+                    Dialect::Mysql | Dialect::MariaDb => {
+                        let ty = if matches!(ty, db::Type::Integer(_)) {
+                            "SIGNED"
+                        } else {
+                            "UNSIGNED"
+                        };
+                        fmt!(f, "CAST(" expr_cast.expr " AS " ty ")")
+                    }
+                }
+            }
             _ => todo!("expr={:#?}", self),
         }
     }
+}
+
+/// The storage type of an integer cast target; `None` for any other type.
+fn integer_cast_ty(ty: &stmt::Type) -> Option<db::Type> {
+    use crate::stmt::Type;
+    Some(match ty {
+        Type::I8 => db::Type::Integer(1),
+        Type::I16 => db::Type::Integer(2),
+        Type::I32 => db::Type::Integer(4),
+        Type::I64 => db::Type::Integer(8),
+        Type::U8 => db::Type::UnsignedInteger(1),
+        Type::U16 => db::Type::UnsignedInteger(2),
+        Type::U32 => db::Type::UnsignedInteger(4),
+        Type::U64 => db::Type::UnsignedInteger(8),
+        _ => return None,
+    })
+}
+
+/// Whether `expr` reads a table column stored as an integer.
+fn is_integer_column(f: &super::Formatter<'_>, expr: &stmt::Expr) -> bool {
+    let stmt::Expr::Reference(expr_reference @ stmt::ExprReference::Column(_)) = expr else {
+        return false;
+    };
+    matches!(
+        f.cx.resolve_expr_reference(expr_reference),
+        ResolvedRef::Column(column)
+            if matches!(column.storage_ty, db::Type::Integer(_) | db::Type::UnsignedInteger(_))
+    )
 }
 
 /// `SUM`, `AVG`, `MIN` or `MAX` over one expression.

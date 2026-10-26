@@ -451,6 +451,7 @@ fn try_eq_lookup(
 
     for (lhs, rhs) in eq_terms {
         let (child_proj, parent_expr) = extract_child_parent_eq(lhs, rhs, depth)?;
+        let parent_expr = match_key_ty(parent_expr, &child_proj, arg_tys, depth);
         child_projections.push(child_proj);
         lookup_key_exprs.push(parent_expr);
     }
@@ -473,6 +474,50 @@ fn try_eq_lookup(
     let lookup_key = eval::Func::from_stmt(lookup_key_expr, lookup_key_arg_tys);
 
     Some((child_projections, lookup_key))
+}
+
+/// Casts a parent key to the type of the child column it is matched with.
+///
+/// The index compares values, so `I32(1)` and `I64(1)` are different keys. The
+/// two columns of a relation may be stored in different widths (SQLite caps an
+/// auto-increment key below the width of a plain integer column), and the
+/// lowered filter compares them as stored, which the database is free to do.
+fn match_key_ty(
+    parent_expr: stmt::Expr,
+    child_proj: &stmt::Projection,
+    arg_tys: &[stmt::Type],
+    depth: usize,
+) -> stmt::Expr {
+    let Some((parent_pos, parent_proj)) = as_simple_arg_project(&parent_expr) else {
+        return parent_expr;
+    };
+    let (Some(parent_ty), Some(child_ty)) = (
+        projected_ty(arg_tys.get(parent_pos), parent_proj),
+        projected_ty(arg_tys.get(depth), child_proj),
+    ) else {
+        return parent_expr;
+    };
+
+    if parent_ty != child_ty && parent_ty.cast_preserves_equality(child_ty) {
+        let child_ty = child_ty.clone();
+        stmt::Expr::cast(parent_expr, child_ty)
+    } else {
+        parent_expr
+    }
+}
+
+/// The type `projection` selects out of the record type `ty`.
+fn projected_ty<'a>(
+    ty: Option<&'a stmt::Type>,
+    projection: &stmt::Projection,
+) -> Option<&'a stmt::Type> {
+    projection
+        .as_slice()
+        .iter()
+        .try_fold(ty?, |ty, step| match ty {
+            stmt::Type::Record(fields) => fields.get(*step),
+            _ => None,
+        })
 }
 
 /// For an equality `lhs == rhs`, determine which side is the child (at `depth`)
