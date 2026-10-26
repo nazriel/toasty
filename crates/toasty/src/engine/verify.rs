@@ -420,13 +420,21 @@ impl Verify<'_, '_> {
         }
 
         for key in &select.group_by {
-            if self.column_path_field(source.id, key).is_none() {
-                self.record(Error::invalid_statement(
-                    "group_by takes field paths: a primitive field of the queried model, \
-                     or of a record reached through belongs_to relations",
-                ));
-                return;
+            if self.group_key_field(source.id, key).is_some() {
+                continue;
             }
+            let embedded = self
+                .resolve_field_path(source.id, key)
+                .is_some_and(|(field, _)| matches!(field.ty, app::FieldTy::Embedded(_)));
+            self.record(Error::invalid_statement(if embedded {
+                "group_by cannot group by an enum with data variants or a whole embedded \
+                 struct; group by a unit-only enum, or by the primitive fields inside the embed"
+            } else {
+                "group_by takes field paths: a primitive field or a unit-only enum of the \
+                 queried model, or of a record reached through belongs_to relations, \
+                 directly or inside embedded structs"
+            }));
+            return;
         }
 
         let mut check = CheckGrouped {
@@ -448,6 +456,41 @@ impl Verify<'_, '_> {
     /// The field `expr` reads when it is a path to a primitive field of
     /// `model`, directly or through `belongs_to` relations.
     fn column_path_field(&self, model: ModelId, expr: &stmt::Expr) -> Option<&app::Field> {
+        let (field, in_embed) = self.resolve_field_path(model, expr)?;
+        if in_embed {
+            return None;
+        }
+
+        match &field.ty {
+            app::FieldTy::Primitive(primitive) if !matches!(primitive.ty, stmt::Type::Model(_)) => {
+                Some(field)
+            }
+            _ => None,
+        }
+    }
+
+    /// The field a grouping key reads: what [`Self::column_path_field`]
+    /// takes, a primitive field inside embedded structs, or a unit-only
+    /// enum. Each lowers to a single column.
+    fn group_key_field(&self, model: ModelId, expr: &stmt::Expr) -> Option<&app::Field> {
+        let (field, _) = self.resolve_field_path(model, expr)?;
+
+        match &field.ty {
+            app::FieldTy::Primitive(primitive) if !matches!(primitive.ty, stmt::Type::Model(_)) => {
+                Some(field)
+            }
+            app::FieldTy::Embedded(embedded) => match self.schema.app.model(embedded.target) {
+                app::Model::EmbeddedEnum(embed) if !embed.has_data_variants() => Some(field),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The field at the end of `expr` when it is a field path from `model`:
+    /// `belongs_to` relations, then fields of embedded structs. Also returns
+    /// whether the path steps into an embedded struct.
+    fn resolve_field_path(&self, model: ModelId, expr: &stmt::Expr) -> Option<(&app::Field, bool)> {
         let (index, steps) = match expr {
             stmt::Expr::Reference(stmt::ExprReference::Field { nesting: 0, index }) => {
                 (*index, &[][..])
@@ -462,25 +505,29 @@ impl Verify<'_, '_> {
         };
 
         let mut field = self.schema.app.model(model).as_root()?.fields.get(index)?;
+        let mut in_embed = false;
         for &step in steps {
-            let app::FieldTy::BelongsTo(belongs_to) = &field.ty else {
-                return None;
+            field = match &field.ty {
+                app::FieldTy::BelongsTo(belongs_to) if !in_embed => self
+                    .schema
+                    .app
+                    .model(belongs_to.target)
+                    .as_root()?
+                    .fields
+                    .get(step)?,
+                app::FieldTy::Embedded(embedded) => {
+                    let app::Model::EmbeddedStruct(embed) = self.schema.app.model(embedded.target)
+                    else {
+                        return None;
+                    };
+                    in_embed = true;
+                    embed.fields.get(step)?
+                }
+                _ => return None,
             };
-            field = self
-                .schema
-                .app
-                .model(belongs_to.target)
-                .as_root()?
-                .fields
-                .get(step)?;
         }
 
-        match &field.ty {
-            app::FieldTy::Primitive(primitive) if !matches!(primitive.ty, stmt::Type::Model(_)) => {
-                Some(field)
-            }
-            _ => None,
-        }
+        Some((field, in_embed))
     }
 
     fn verify_offset_key_matches_order_by(&mut self, i: &stmt::Query) {

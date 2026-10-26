@@ -85,7 +85,10 @@ let top: Vec<(String, Option<i64>)> = Order::all()
 ### A related record's field
 
 A path through `belongs_to` relations can be projected, grouped by,
-aggregated, and ordered by. For an optional relation the path keeps the
+aggregated, and ordered by. A projected embedded field of the related
+record (an enum, a struct, or a field inside a struct) is read by the same
+join; one that holds deferred fields or relations is read by the related
+record's own statement. For an optional relation the path keeps the
 field's type, so `.nullable()` reads it as an `Option`:
 
 ```rust
@@ -113,8 +116,14 @@ optional; a path used twice joins once.
   compile time: the typed builder does not track which fields are grouped.
 - An aggregate inside `.filter(...)` (use `.having(...)`).
 - A grouped query without `.select(...)`; it cannot return model records.
-- A grouping key or an aggregate argument that is not a primitive field of
-  the model or of a record reached through `belongs_to` relations.
+- A grouping key that is not a primitive field or a unit-only enum, of the
+  model or of a record reached through `belongs_to` relations, directly or
+  inside embedded structs (`Ticket::fields().site().city()`). A unit-only
+  enum groups by its discriminant column. An enum with data variants or a
+  whole embedded struct is not a grouping key: its value spans several
+  columns.
+- An aggregate argument that is not a primitive field of the model or of a
+  record reached through `belongs_to` relations.
 
 **Errors from the backend.** `unsupported_feature` on DynamoDB (see below)
 and for cursor pagination (`.paginate(...)`) of a grouped or aggregating
@@ -200,6 +209,6 @@ cardinality.
   covered by the planned relation-aggregate surface.
 - Paths through `has_many`/`has_one` in projections; the column-projection
   design covers them.
-- Grouping by fields of embedded types.
+- Grouping by an enum with data variants or by a whole embedded struct.
 
 [#421]: https://github.com/tokio-rs/toasty/issues/421

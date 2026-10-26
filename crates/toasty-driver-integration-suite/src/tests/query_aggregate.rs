@@ -484,3 +484,155 @@ pub async fn aggregates_are_rejected_without_sql(test: &mut Test) -> Result<()> 
 
     Ok(())
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, toasty::Embed)]
+enum Priority {
+    #[column(variant = 1)]
+    Low,
+    #[column(variant = 2)]
+    High,
+}
+
+#[derive(Debug, toasty::Embed)]
+enum Resolution {
+    #[column(variant = 1)]
+    Open,
+    #[column(variant = 2)]
+    Closed { reason: String },
+}
+
+#[derive(Debug, toasty::Embed)]
+struct Place {
+    city: String,
+}
+
+#[derive(Debug, toasty::Model)]
+struct Ticket {
+    #[key]
+    #[auto]
+    id: uuid::Uuid,
+
+    priority: Priority,
+
+    resolution: Resolution,
+
+    place: Place,
+
+    hours: i64,
+}
+
+/// | priority | resolution     | city | hours |
+/// |----------|----------------|------|-------|
+/// | High     | Open           | Oslo | 1     |
+/// | Low      | Closed(done)   | Oslo | 2     |
+/// | High     | Closed(dupe)   | Rome | 4     |
+async fn setup_tickets(test: &mut Test) -> Result<Db> {
+    let mut db = test.setup_db(models!(Ticket)).await;
+
+    for (priority, resolution, city, hours) in [
+        (Priority::High, Resolution::Open, "Oslo", 1),
+        (
+            Priority::Low,
+            Resolution::Closed {
+                reason: "done".to_string(),
+            },
+            "Oslo",
+            2,
+        ),
+        (
+            Priority::High,
+            Resolution::Closed {
+                reason: "dupe".to_string(),
+            },
+            "Rome",
+            4,
+        ),
+    ] {
+        Ticket::create()
+            .priority(priority)
+            .resolution(resolution)
+            .place(Place {
+                city: city.to_string(),
+            })
+            .hours(hours)
+            .exec(&mut db)
+            .await?;
+    }
+
+    test.log().clear();
+    Ok(db)
+}
+
+#[driver_test(requires(sql))]
+pub async fn group_by_a_unit_enum(test: &mut Test) -> Result<()> {
+    let mut db = setup_tickets(test).await?;
+
+    let mut rows: Vec<(Priority, u64, Option<i64>)> = Ticket::all()
+        .group_by(Ticket::fields().priority())
+        .select((
+            Ticket::fields().priority(),
+            count_all(),
+            sum(Ticket::fields().hours()),
+        ))
+        .exec(&mut db)
+        .await?;
+
+    // The order of an enum's groups differs by backend.
+    rows.sort();
+    assert_eq!(
+        rows,
+        [(Priority::Low, 1, Some(2)), (Priority::High, 2, Some(5))]
+    );
+    assert_one_statement(test);
+    Ok(())
+}
+
+#[driver_test(requires(sql))]
+pub async fn group_by_a_field_inside_an_embedded_struct(test: &mut Test) -> Result<()> {
+    let mut db = setup_tickets(test).await?;
+
+    let rows: Vec<(String, u64)> = Ticket::all()
+        .group_by(Ticket::fields().place().city())
+        .select((Ticket::fields().place().city(), count_all()))
+        .order_by(Ticket::fields().place().city().asc())
+        .exec(&mut db)
+        .await?;
+
+    assert_eq!(rows, [("Oslo".to_string(), 2), ("Rome".to_string(), 1)]);
+    assert_one_statement(test);
+
+    let rows: Vec<String> = Ticket::all()
+        .group_by(Ticket::fields().place().city())
+        .having(Ticket::fields().place().city().ne("Rome"))
+        .select(Ticket::fields().place().city())
+        .exec(&mut db)
+        .await?;
+
+    assert_eq!(rows, ["Oslo"]);
+    assert_one_statement(test);
+    Ok(())
+}
+
+#[driver_test(requires(sql))]
+pub async fn group_by_a_data_enum_or_a_whole_struct_is_rejected(test: &mut Test) -> Result<()> {
+    let mut db = setup_tickets(test).await?;
+
+    let err = Ticket::all()
+        .group_by(Ticket::fields().resolution())
+        .select((Ticket::fields().resolution(), count_all()))
+        .exec(&mut db)
+        .await
+        .unwrap_err();
+    assert!(err.is_invalid_statement(), "unexpected error: {err}");
+
+    let err = Ticket::all()
+        .group_by(Ticket::fields().place())
+        .select((Ticket::fields().place(), count_all()))
+        .exec(&mut db)
+        .await
+        .unwrap_err();
+    assert!(err.is_invalid_statement(), "unexpected error: {err}");
+
+    assert!(test.log().is_empty());
+    Ok(())
+}

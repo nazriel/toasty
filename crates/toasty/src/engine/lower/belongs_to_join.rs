@@ -54,10 +54,13 @@ impl LowerStatement<'_, '_> {
             schema: self.schema(),
             model: source.id,
             joins: BelongsToJoins::default(),
+            decode: false,
         };
 
         if let stmt::Returning::Project(expr) = &mut select.returning {
+            rewrite.decode = true;
             rewrite.visit_expr_mut(expr);
+            rewrite.decode = false;
         }
         for key in &mut select.group_by {
             rewrite.visit_expr_mut(key);
@@ -104,6 +107,10 @@ struct RewritePaths<'a> {
     schema: &'a toasty_core::Schema,
     model: app::ModelId,
     joins: BelongsToJoins,
+    /// Whether the expression being visited is a value the query returns as
+    /// it is, which may decode a whole embed. Anywhere else (a grouping key,
+    /// an ordering, an operand) a path must read a single column.
+    decode: bool,
 }
 
 impl stmt::VisitMut for RewritePaths<'_> {
@@ -112,7 +119,12 @@ impl stmt::VisitMut for RewritePaths<'_> {
             *expr = column;
             return;
         }
+        // The fields of a returned record are returned as they are; the
+        // operands of any other expression are not.
+        let decode = self.decode;
+        self.decode &= matches!(expr, stmt::Expr::Record(_));
         stmt::visit_mut::visit_expr_mut(self, expr);
+        self.decode = decode;
     }
 
     // A nested statement reads its own model; its paths are its own.
@@ -124,8 +136,15 @@ impl stmt::VisitMut for RewritePaths<'_> {
 }
 
 impl RewritePaths<'_> {
-    /// The column expression for `expr` when it reads a primitive field
-    /// through one or more `belongs_to` relations of the query's model.
+    /// The table-level expression for `expr` when it reads a field through
+    /// one or more `belongs_to` relations of the query's model.
+    ///
+    /// The field is a primitive, a primitive inside embedded structs, or a
+    /// unit-only enum: each reads one column. Where the value is returned as
+    /// it is, it may also be a data-carrying enum or a whole embedded struct,
+    /// decoded from the joined table's columns as the model's own embeds are.
+    /// An embed holding deferred fields or relations is not rewritten: its
+    /// loading needs the related record's own statement.
     fn rewrite_path(&mut self, expr: &stmt::Expr) -> Option<stmt::Expr> {
         let stmt::Expr::Project(project) = expr else {
             return None;
@@ -141,27 +160,122 @@ impl RewritePaths<'_> {
             index: *index,
         }];
         let mut model = self.belongs_to_target(chain[0])?;
-        let (&terminal, steps) = project.projection.as_slice().split_last()?;
-        for &step in steps {
-            let field = app::FieldId { model, index: step };
-            model = self.belongs_to_target(field)?;
-            chain.push(field);
+        let mut steps = project.projection.as_slice();
+        while let [step, rest @ ..] = steps
+            && let Some(target) = self.belongs_to_target(app::FieldId {
+                model,
+                index: *step,
+            })
+        {
+            chain.push(app::FieldId {
+                model,
+                index: *step,
+            });
+            model = target;
+            steps = rest;
         }
 
-        let mapping::Field::Primitive(primitive) =
-            self.schema.mapping_for(model).fields.get(terminal)?
-        else {
-            return None;
+        let field = self.embedded_path_field(model, steps)?;
+        let mapping = self
+            .schema
+            .mapping_for(model)
+            .resolve_field_mapping(&steps.into())?;
+
+        let (mut value, decoded) = match mapping {
+            mapping::Field::Primitive(primitive) => (primitive.column_expr.clone(), false),
+            mapping::Field::Enum(field_enum) if !self.has_data_variants(field) => {
+                (field_enum.discriminant.column_expr.clone(), false)
+            }
+            mapping::Field::Enum(field_enum) if self.decode && self.loads_eagerly(field) => {
+                (field_enum.default_returning.clone(), true)
+            }
+            mapping::Field::Struct(field_struct) if self.decode && self.loads_eagerly(field) => {
+                (field_struct.default_returning.clone(), true)
+            }
+            _ => return None,
         };
 
         let slot = self.join(&chain);
-        let mut column = primitive.column_expr.clone();
-        stmt::visit_mut::for_each_expr_mut(&mut column, |e| {
+        stmt::visit_mut::for_each_expr_mut(&mut value, |e| {
             if let stmt::Expr::Reference(stmt::ExprReference::Column(col)) = e {
                 col.table = slot;
             }
         });
-        Some(column)
+
+        // Without a related record a LEFT JOIN reads every column as `NULL`,
+        // which a single column returns as it is but a decoded embed would
+        // read as an unknown discriminant or a record of `NULL`s. Guard the
+        // decoding on the joined record's presence, as a nullable embedded
+        // struct guards its record on its presence column.
+        if decoded
+            && chain
+                .iter()
+                .any(|field_id| self.schema.app.field(*field_id).nullable())
+        {
+            let table = self.schema.db.table(self.schema.table_id_for(model));
+            let key = stmt::Expr::column(stmt::ExprReference::column(
+                slot,
+                table.primary_key.columns[0].index,
+            ));
+            value = stmt::Expr::match_expr(
+                stmt::Expr::is_null(key),
+                vec![stmt::MatchArm {
+                    pattern: stmt::Value::Bool(false),
+                    expr: value,
+                }],
+                stmt::Expr::null(),
+            );
+        }
+
+        Some(value)
+    }
+
+    /// The field `steps` reach inside `model`: a field of the model, then
+    /// fields of embedded structs.
+    fn embedded_path_field(&self, model: app::ModelId, steps: &[usize]) -> Option<&app::Field> {
+        let (&first, rest) = steps.split_first()?;
+        let mut field = self.schema.app.model(model).as_root()?.fields.get(first)?;
+        for &step in rest {
+            let app::FieldTy::Embedded(embedded) = &field.ty else {
+                return None;
+            };
+            let app::Model::EmbeddedStruct(embed) = self.schema.app.model(embedded.target) else {
+                return None;
+            };
+            field = embed.fields.get(step)?;
+        }
+        Some(field)
+    }
+
+    /// Whether `field` is an embedded enum with a variant that carries data.
+    fn has_data_variants(&self, field: &app::Field) -> bool {
+        let app::FieldTy::Embedded(embedded) = &field.ty else {
+            return false;
+        };
+        match self.schema.app.model(embedded.target) {
+            app::Model::EmbeddedEnum(embed) => embed.has_data_variants(),
+            _ => false,
+        }
+    }
+
+    /// Whether an embedded field's value is read whole by its default
+    /// decoding: neither it nor any field nested in it is deferred or a
+    /// relation.
+    fn loads_eagerly(&self, field: &app::Field) -> bool {
+        match &field.ty {
+            app::FieldTy::Primitive(_) => !field.deferred,
+            app::FieldTy::Embedded(embedded) => {
+                !field.deferred
+                    && self
+                        .schema
+                        .app
+                        .model(embedded.target)
+                        .fields()
+                        .iter()
+                        .all(|field| self.loads_eagerly(field))
+            }
+            app::FieldTy::BelongsTo(_) | app::FieldTy::Has(_) | app::FieldTy::Via(_) => false,
+        }
     }
 
     /// The model a `belongs_to` field points at, or `None` for any other

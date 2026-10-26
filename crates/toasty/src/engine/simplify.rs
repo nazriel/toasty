@@ -273,6 +273,14 @@ impl VisitMut for Simplify<'_> {
         let mut s = self.scope(&stmt.source);
 
         s.visit_filter_mut(&mut stmt.filter);
+        // A key read inside an embedded struct lowers to a projection of the
+        // embed's record, which simplification reduces to its column.
+        for key in &mut stmt.group_by {
+            s.visit_expr_mut(key);
+        }
+        if let Some(having) = &mut stmt.having {
+            s.visit_expr_mut(having);
+        }
         s.visit_returning_mut(&mut stmt.returning);
     }
 
