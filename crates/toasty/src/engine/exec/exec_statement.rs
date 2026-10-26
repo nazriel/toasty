@@ -61,16 +61,48 @@ impl Exec<'_> {
         &mut self,
         action: &mir::ExecStatement,
     ) -> Result<ExecResponse> {
+        let mut input_values = self.collect_input(action.inputs.iter().copied()).await?;
+
+        // A batch load too big for the database's variable limit runs in
+        // chunks of its input, one statement after another.
+        if let Some((position, chunks)) = self.split_batch_load(action, &input_values) {
+            let mut rows = Vec::new();
+
+            for chunk in chunks {
+                input_values[position] = stmt::Value::List(chunk);
+
+                let res = self.exec_statement_with(action, &input_values).await?;
+                match res.values.collect_as_value().await? {
+                    stmt::Value::List(chunk_rows) => rows.extend(chunk_rows),
+                    value => {
+                        return Err(toasty_core::Error::invalid_result(format!(
+                            "batch load expected List, got {value:?}"
+                        )));
+                    }
+                }
+            }
+
+            return Ok(ExecResponse::value_stream(rows));
+        }
+
+        self.exec_statement_with(action, &input_values).await
+    }
+
+    /// Runs the statement with `input_values` substituted for its inputs.
+    async fn exec_statement_with(
+        &mut self,
+        action: &mir::ExecStatement,
+        input_values: &[stmt::Value],
+    ) -> Result<ExecResponse> {
         // Databases always return rows as a vec of values; this specifies the
         // type of each value. `None` means the statement returns only a count.
         let output_ty = mir::row_field_types(&action.ty);
 
         let mut stmt = action.stmt.clone();
 
-        // Collect input values and substitute into the statement
-        if !action.inputs.is_empty() {
-            let input_values = self.collect_input(action.inputs.iter().copied()).await?;
-            stmt.substitute(&input_values);
+        // Substitute the input values into the statement
+        if !input_values.is_empty() {
+            stmt.substitute(input_values);
 
             self.engine.simplify_stmt(&mut stmt);
         }
@@ -106,7 +138,7 @@ impl Exec<'_> {
         // Legalize the statement for the target backend and extract bind
         // parameters (SQL drivers only; key-value drivers read values
         // directly from the statement).
-        let params = self.engine.prepare_for_driver(&mut stmt);
+        let params = self.engine.prepare_for_driver(&mut stmt)?;
 
         let ret = match action.conditional {
             // A conditional write prefixes its result with two `I64` probe
@@ -307,7 +339,7 @@ impl Exec<'_> {
         ret_ty: Option<Vec<stmt::Type>>,
     ) -> Result<toasty_core::driver::ExecResponse> {
         let mut select_stmt = mysql_update.select_stmt;
-        let select_params = self.engine.prepare_for_driver(&mut select_stmt);
+        let select_params = self.engine.prepare_for_driver(&mut select_stmt)?;
 
         let op = operation::QuerySql {
             stmt: select_stmt,

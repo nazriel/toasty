@@ -84,6 +84,23 @@ fn null_passes_through() {
 }
 
 #[test]
+fn cast_of_a_literal_out_of_range_becomes_an_error_expression() {
+    // `cast(300, U8)` cannot be folded to a value; the cast's error is kept in
+    // the expression instead of panicking.
+    let mut expr = ExprCast {
+        from: None,
+        expr: Box::new(Expr::Value(Value::I64(300))),
+        ty: Type::U8,
+    };
+    let result = fold_expr_cast(&mut expr);
+
+    let Some(Expr::Error(error)) = result else {
+        panic!("expected an `Expr::Error`, got {result:?}");
+    };
+    assert!(!error.message.is_empty());
+}
+
+#[test]
 fn document_lowering_cast_skipped() {
     // A `#[document]` lowering cast (source type present) is schema-directed;
     // fold is schema-free and must leave it for the simplifier.

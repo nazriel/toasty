@@ -18,6 +18,7 @@
 //! lowering/simplification, and document *paths* are resolved by legalization
 //! ([`super::legalize`]) — `Engine::prepare_for_driver` runs both in order.
 
+use crate::{Error, Result};
 use toasty_core::{
     driver::{Capability, operation::TypedValue},
     schema::db,
@@ -42,24 +43,24 @@ pub(crate) fn run(
     stmt: &mut stmt::Statement,
     db_schema: &db::Schema,
     capability: &Capability,
-) -> Vec<TypedValue> {
+) -> Result<Vec<TypedValue>> {
     // Phase 1: mechanical extraction — replace values with Arg(n).
     let mut params: Vec<Param> = Vec::new();
-    extract::extract_values(stmt, &mut params, capability);
+    extract::extract_values(stmt, &mut params, capability)?;
 
     // Phases 2+3: bidirectional type inference — refine param types.
     infer::refine_param_types(stmt, db_schema, &mut params);
 
-    // Materialize the final TypedValues. `finalize_ty` panics if any param is
+    // Materialize the final TypedValues. `finalize_ty` fails if any param is
     // still unresolved — synthesize/check is expected to type every param.
     params
         .into_iter()
         .map(|p| {
             let Param { value, ty } = p;
-            TypedValue {
-                ty: finalize_ty(&value, ty),
+            Ok(TypedValue {
+                ty: finalize_ty(&value, ty)?,
                 value,
-            }
+            })
         })
         .collect()
 }
@@ -71,18 +72,20 @@ struct Param {
     ty: Ty,
 }
 
-/// Resolve a `Ty` to a concrete `db::Type`. Panics on `Unknown` / `Record` —
-/// every param should be fully inferred by the synthesize/check pass; if a
-/// statement reaches here with an unresolved param, that's a bug worth
-/// surfacing so we can evaluate the specific case.
-fn finalize_ty(value: &stmt::Value, ty: Ty) -> db::Type {
+/// Resolve a `Ty` to a concrete `db::Type`. Fails on `Unknown` / `Record` —
+/// every param should be fully inferred by the synthesize/check pass; a value
+/// it could not type (e.g. a key of a type no column pins down, bound only as
+/// a batch load's `VALUES`) is a statement the database cannot be handed.
+fn finalize_ty(value: &stmt::Value, ty: Ty) -> Result<db::Type> {
     match ty {
-        Ty::Column(t) | Ty::Inferred(t) => t,
-        Ty::List(elem) => db::Type::list(finalize_ty(value, *elem)),
-        Ty::Unknown => panic!("bind left {value:?} with unresolved type"),
-        Ty::Record(_) => panic!(
-            "bind left {value:?} typed as a record; only scalars and lists are extracted as params"
-        ),
+        Ty::Column(t) | Ty::Inferred(t) => Ok(t),
+        Ty::List(elem) => Ok(db::Type::list(finalize_ty(value, *elem)?)),
+        Ty::Unknown => Err(Error::unsupported_feature(format!(
+            "cannot infer the database type of the bind parameter {value:?}"
+        ))),
+        Ty::Record(_) => Err(Error::invalid_statement(format!(
+            "the bind parameter {value:?} is a record; only scalars and lists are bound"
+        ))),
     }
 }
 

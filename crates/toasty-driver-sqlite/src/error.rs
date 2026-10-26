@@ -21,7 +21,42 @@ pub(crate) fn classify_sqlite_error(err: rusqlite::Error) -> toasty_core::Error 
         return toasty_core::Error::constraint_violation(unique_violation(message));
     }
 
-    toasty_core::Error::driver_operation_failed(err)
+    toasty_core::Error::driver_operation_failed(truncate_sql(err))
+}
+
+/// The longest statement text an error carries.
+const MAX_ERROR_SQL: usize = 1024;
+
+/// Cuts the statement text a rusqlite error carries (SQLite reports a
+/// statement it cannot prepare with its whole text) to its first
+/// [`MAX_ERROR_SQL`] bytes and the length of the rest.
+fn truncate_sql(err: rusqlite::Error) -> rusqlite::Error {
+    let rusqlite::Error::SqlInputError {
+        error,
+        msg,
+        mut sql,
+        offset,
+    } = err
+    else {
+        return err;
+    };
+
+    if sql.len() > MAX_ERROR_SQL {
+        let total = sql.len();
+        let mut end = MAX_ERROR_SQL;
+        while !sql.is_char_boundary(end) {
+            end -= 1;
+        }
+        sql.truncate(end);
+        sql.push_str(&format!("... ({total} bytes in all)"));
+    }
+
+    rusqlite::Error::SqlInputError {
+        error,
+        msg,
+        sql,
+        offset,
+    }
 }
 
 /// Builds a unique violation from SQLite's message, taking the detail it
@@ -176,6 +211,49 @@ mod tests {
             assert!(err.is_driver_operation_failed(), "{message}");
             assert!(!err.is_constraint_violation(), "{message}");
         }
+    }
+
+    fn input_error(sql: String) -> rusqlite::Error {
+        rusqlite::Error::SqlInputError {
+            error: ffi::Error::new(ffi::SQLITE_ERROR),
+            msg: "variable number must be between ?1 and ?32766".to_owned(),
+            sql,
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn an_error_carries_a_bounded_statement() {
+        let sql = format!("SELECT {}", "?, ".repeat(100_000));
+        let total = sql.len();
+        let err = classify_sqlite_error(input_error(sql));
+        assert!(err.is_driver_operation_failed());
+
+        let message = err.to_string();
+        assert!(
+            message.contains("variable number must be between"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("({total} bytes in all)")),
+            "{message}"
+        );
+        assert!(message.len() < 2 * MAX_ERROR_SQL, "{}", message.len());
+    }
+
+    #[test]
+    fn a_short_statement_is_kept_whole() {
+        let err = classify_sqlite_error(input_error("SELECT ?1".to_owned()));
+        assert!(err.to_string().contains("SELECT ?1"));
+        assert!(!err.to_string().contains("bytes in all"));
+    }
+
+    #[test]
+    fn the_statement_is_cut_on_a_character_boundary() {
+        // A three-byte character straddles the limit.
+        let sql = format!("{}{}", "a".repeat(MAX_ERROR_SQL - 1), "€".repeat(10));
+        let err = classify_sqlite_error(input_error(sql));
+        assert!(err.to_string().contains("bytes in all"));
     }
 
     #[test]

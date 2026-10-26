@@ -7,7 +7,12 @@ use toasty_core::{
 };
 
 use super::extract::{binary_like_prefix_pattern, glob_prefix_pattern};
-use super::{Param, Ty, run};
+use super::{Param, Ty};
+use toasty_core::driver::{Capability, operation::TypedValue};
+
+fn run(stmt: &mut stmt::Statement, db_schema: &db::Schema, cap: &Capability) -> Vec<TypedValue> {
+    super::run(stmt, db_schema, cap).unwrap()
+}
 
 // ============================================================================
 // Basic extraction
@@ -116,6 +121,53 @@ fn extract_from_where_clause() {
         &toasty_core::driver::Capability::SQLITE,
     );
     assert_eq!(params.len(), 0);
+}
+
+// ============================================================================
+// Statements that cannot be bound
+// ============================================================================
+
+#[test]
+fn an_error_expression_fails_the_statement() {
+    let schema = test_schema();
+
+    let mut stmt = stmt::Statement::Query(stmt::Query {
+        with: None,
+        body: stmt::ExprSet::Values(stmt::Values::new(vec![
+            Expr::from(Value::from(1i64)),
+            Expr::error("out of range integral type conversion attempted"),
+        ])),
+        single: false,
+        order_by: None,
+        limit: None,
+        locks: vec![],
+    });
+
+    let err = super::run(
+        &mut stmt,
+        &schema.db,
+        &toasty_core::driver::Capability::SQLITE,
+    )
+    .unwrap_err();
+    assert!(err.is_expression_evaluation_failed(), "{err}");
+    assert!(
+        err.to_string()
+            .contains("out of range integral type conversion attempted"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_param_without_a_type_is_an_error() {
+    let err = super::finalize_ty(&Value::from(1.5f64), Ty::Unknown).unwrap_err();
+    assert!(err.is_unsupported_feature(), "{err}");
+
+    let err =
+        super::finalize_ty(&Value::from(1.5f64), Ty::List(Box::new(Ty::Unknown))).unwrap_err();
+    assert!(err.is_unsupported_feature(), "{err}");
+
+    let err = super::finalize_ty(&Value::Null, Ty::Record(vec![])).unwrap_err();
+    assert!(err.is_invalid_statement(), "{err}");
 }
 
 // ============================================================================

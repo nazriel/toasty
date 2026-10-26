@@ -18,7 +18,7 @@ impl Exec<'_> {
             self.engine.simplify_stmt(&mut stmt);
         }
 
-        let params = self.engine.prepare_for_driver(&mut stmt);
+        let params = self.engine.prepare_for_driver(&mut stmt)?;
         let op = operation::Upsert {
             stmt: stmt.into_insert_unwrap(),
             params,

@@ -24,6 +24,11 @@ pub(super) fn fold_expr_cast(expr: &mut stmt::ExprCast) -> Option<Expr> {
         return None;
     };
 
-    let cast = expr.ty.cast(&(), value.take()).unwrap();
-    Some(cast.into())
+    // Fold cannot fail. A literal the target type cannot hold becomes an
+    // error expression carrying the cast's message, which binding the
+    // statement (or evaluating it) reports.
+    Some(match expr.ty.cast(&(), value.take()) {
+        Ok(cast) => cast.into(),
+        Err(err) => Expr::error(err.to_string()),
+    })
 }

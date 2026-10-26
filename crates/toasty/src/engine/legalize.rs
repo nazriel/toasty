@@ -38,13 +38,16 @@ impl Engine {
     /// Every driver-bound statement passes through this method, after the
     /// last engine-side mutation (e.g. the MySQL `RETURNING` rewrites) and
     /// immediately before the driver serializes it.
-    pub(crate) fn prepare_for_driver(&self, stmt: &mut stmt::Statement) -> Vec<TypedValue> {
+    pub(crate) fn prepare_for_driver(
+        &self,
+        stmt: &mut stmt::Statement,
+    ) -> crate::Result<Vec<TypedValue>> {
         self.legalize_statement(stmt);
 
         if self.capability().sql() {
             super::bind::run(stmt, &self.schema.db, self.capability())
         } else {
-            vec![]
+            Ok(vec![])
         }
     }
 

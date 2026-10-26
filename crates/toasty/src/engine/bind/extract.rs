@@ -8,23 +8,35 @@ use toasty_core::{
 };
 
 use super::{Param, Ty};
+use crate::Result;
 
 /// Replace all scalar `Value` nodes with `Arg(n)` placeholders, initializing
 /// each param's `ty` from the value itself.
+///
+/// Fails with the message of the first `Expr::Error` in the statement: a
+/// database cannot evaluate it, so a statement that still holds one cannot run.
 pub(super) fn extract_values(
     stmt: &mut stmt::Statement,
     params: &mut Vec<Param>,
     capability: &Capability,
-) {
+) -> Result<()> {
     struct Extract<'a> {
         params: &'a mut Vec<Param>,
         bind_list_param: bool,
         glob_starts_with: bool,
         binary_like_starts_with: bool,
+        error: Option<crate::Error>,
     }
 
     impl stmt::VisitMut for Extract<'_> {
         fn visit_expr_mut(&mut self, expr: &mut stmt::Expr) {
+            if let stmt::Expr::Error(expr_error) = expr {
+                self.error.get_or_insert_with(|| {
+                    crate::Error::expression_evaluation_failed(&expr_error.message)
+                });
+                return;
+            }
+
             // Intercept ANY/ALL: bind their array operand as one Value::List
             // param rather than visiting the rhs and extracting each element
             // separately. The element type is refined to the column type by
@@ -148,13 +160,16 @@ pub(super) fn extract_values(
         }
     }
 
-    Extract {
+    let mut extract = Extract {
         params,
         bind_list_param: capability.bind_list_param,
         glob_starts_with: capability.glob_starts_with,
         binary_like_starts_with: capability.binary_like_starts_with,
-    }
-    .visit_mut(stmt);
+        error: None,
+    };
+    extract.visit_mut(stmt);
+
+    extract.error.map_or(Ok(()), Err)
 }
 
 /// Whether `expr` is an `Expr::Value` carrying an extractable scalar.

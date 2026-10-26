@@ -30,6 +30,8 @@ mod rmw;
 
 mod scan;
 
+mod split_batch;
+
 mod update_by_key;
 
 mod upsert;

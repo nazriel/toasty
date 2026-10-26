@@ -110,6 +110,7 @@ pub mod relation_many_to_many;
 pub mod relation_preload;
 pub mod relation_preload_batch_keys;
 pub mod relation_preload_filter;
+pub mod relation_preload_large_batch;
 pub mod relation_preload_options;
 pub mod relation_signed_key;
 pub mod relation_via_mutation_runtime_error;
