@@ -735,6 +735,21 @@ struct CheckGrouped<'a, 'b, 'v> {
     keys: &'b [stmt::Expr],
 }
 
+impl CheckGrouped<'_, '_, '_> {
+    /// Whether every primary-key field of the model is a grouping key, so
+    /// that each group is one record.
+    fn keys_cover_primary_key(&self) -> bool {
+        let Some(root) = self.verify.schema.app.model(self.model).as_root() else {
+            return false;
+        };
+
+        root.primary_key
+            .fields
+            .iter()
+            .all(|field| self.keys.contains(&stmt::Expr::ref_self_field(*field)))
+    }
+}
+
 impl stmt::Visit for CheckGrouped<'_, '_, '_> {
     fn visit_expr(&mut self, expr: &stmt::Expr) {
         if self.keys.contains(expr) {
@@ -779,6 +794,17 @@ impl stmt::Visit for CheckGrouped<'_, '_, '_> {
                 };
                 for path in enclosing_row_paths(query) {
                     if self.keys.contains(&path) {
+                        continue;
+                    }
+                    // A reference to the whole record reads its primary key,
+                    // which the groups must be keyed by.
+                    if is_model_path(&path) {
+                        if !self.keys_cover_primary_key() {
+                            self.verify.record(Error::invalid_statement(
+                                "a value of a related record reads the record of a grouped or \
+                                 aggregating query, whose primary key is not a group_by key",
+                            ));
+                        }
                         continue;
                     }
                     let name = self
@@ -873,7 +899,9 @@ fn enclosing_row_paths(query: &stmt::Query) -> Vec<stmt::Expr> {
 
     fn path_root_nesting(expr: &stmt::Expr) -> Option<usize> {
         match expr {
-            stmt::Expr::Reference(stmt::ExprReference::Field { nesting, .. }) => Some(*nesting),
+            stmt::Expr::Reference(
+                stmt::ExprReference::Field { nesting, .. } | stmt::ExprReference::Model { nesting },
+            ) => Some(*nesting),
             stmt::Expr::Project(project) => path_root_nesting(&project.base),
             _ => None,
         }
@@ -881,7 +909,9 @@ fn enclosing_row_paths(query: &stmt::Query) -> Vec<stmt::Expr> {
 
     fn path_root_nesting_mut(expr: &mut stmt::Expr) -> Option<&mut usize> {
         match expr {
-            stmt::Expr::Reference(stmt::ExprReference::Field { nesting, .. }) => Some(nesting),
+            stmt::Expr::Reference(
+                stmt::ExprReference::Field { nesting, .. } | stmt::ExprReference::Model { nesting },
+            ) => Some(nesting),
             stmt::Expr::Project(project) => path_root_nesting_mut(&mut project.base),
             _ => None,
         }
@@ -893,6 +923,16 @@ fn enclosing_row_paths(query: &stmt::Query) -> Vec<stmt::Expr> {
     };
     collect.visit_stmt_query(query);
     collect.paths
+}
+
+/// Whether `expr` is rooted at a reference to a whole record rather than at
+/// one of its fields.
+fn is_model_path(expr: &stmt::Expr) -> bool {
+    match expr {
+        stmt::Expr::Reference(stmt::ExprReference::Model { .. }) => true,
+        stmt::Expr::Project(project) => is_model_path(&project.base),
+        _ => false,
+    }
 }
 
 /// Whether `expr` is a field path rooted at the current query's model.

@@ -391,3 +391,52 @@ pub async fn select_related_subqueries_are_rejected_without_sql(test: &mut Test)
 
     Ok(())
 }
+
+/// A related value correlated through the whole enclosing record, not one of
+/// its fields.
+fn label_by_record(kind: &str) -> Expr<Option<String>> {
+    Query::<List<Item>>::all()
+        .filter(Item::fields().kind().eq(kind))
+        .limit(1)
+        .value_for(
+            Item::fields().label(),
+            Item::fields().owner().into(),
+            Owner::path_root(),
+        )
+}
+
+/// A related value correlated through the whole record reads its primary key,
+/// so a grouped query takes it when the primary key is a grouping key.
+#[driver_test(requires(sql))]
+pub async fn select_a_related_value_correlated_by_record_in_a_grouped_query(
+    test: &mut Test,
+) -> Result<()> {
+    let mut db = setup_owners(test).await?;
+
+    let mut rows: Vec<(String, Option<String>, u64)> = Owner::all()
+        .group_by((Owner::fields().id(), Owner::fields().name()))
+        .select((Owner::fields().name(), label_by_record("food"), count_all()))
+        .exec(&mut db)
+        .await?;
+    assert_one_statement(test);
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            ("ann".to_string(), Some("apple".to_string()), 1),
+            ("bob".to_string(), Some("bread".to_string()), 1),
+            ("cid".to_string(), None, 1),
+        ]
+    );
+
+    let err = Owner::all()
+        .group_by(Owner::fields().name())
+        .select((Owner::fields().name(), label_by_record("food")))
+        .exec(&mut db)
+        .await
+        .map(|_: Vec<(String, Option<String>)>| ())
+        .unwrap_err();
+    assert!(err.is_invalid_statement(), "unexpected error: {err}");
+
+    Ok(())
+}
