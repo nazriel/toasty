@@ -203,8 +203,9 @@ pub trait Connection: Debug + Send + 'static {
     /// another idle connection or opens a fresh one. A connection is
     /// also re-checked immediately after every [`Connection::exec`]; if
     /// the operation flipped the flag (e.g. the driver classified the
-    /// error as connection-lost and updated its state), the worker task
-    /// exits and the slot is evicted.
+    /// error as connection-lost and updated its state), the connection is
+    /// marked invalid before the caller sees the result, and the slot is
+    /// evicted instead of returning to the idle set.
     ///
     /// The default returns `true`. Drivers without a usable passive
     /// signal stay on this default and rely on the active path: an

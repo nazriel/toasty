@@ -9,10 +9,13 @@
 
 use std::{
     borrow::Cow,
+    future::Future,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
     },
+    task::Poll,
     time::Duration,
 };
 
@@ -41,6 +44,8 @@ struct MockState {
     pings: AtomicU32,
     ping_fail_tokens: AtomicU32,
     exec_fail_tokens: AtomicU32,
+    /// Each token makes one `exec` panic once the inner driver is done.
+    exec_panic_tokens: AtomicU32,
     connects: AtomicU32,
 }
 
@@ -115,7 +120,12 @@ impl Connection for MockConnection {
                 "mock exec failure",
             )));
         }
-        self.inner.exec(schema, op).await
+        let response = self.inner.exec(schema, op).await;
+        if self.state.exec_panic_tokens.load(Ordering::Relaxed) > 0 {
+            self.state.exec_panic_tokens.fetch_sub(1, Ordering::Relaxed);
+            panic!("mock exec panic");
+        }
+        response
     }
 
     fn is_valid(&self) -> bool {
@@ -308,7 +318,7 @@ async fn eager_escalation_after_observed_loss() {
     .unwrap();
 }
 
-/// A failing periodic ping self-wakes via `ConnectionTask::respond`,
+/// A failing periodic ping self-wakes when it marks its connection bad,
 /// which queues a sweep-notify permit before the same iteration
 /// calls `escalate()`. The escalate snapshot includes that bump, so
 /// on the next loop pass the queued permit must be deduped against
@@ -550,4 +560,97 @@ async fn lifetime_and_idle_caps_do_not_evict_fresh_connection() {
         connects_before,
         "recycle replaced a connection within both caps",
     );
+}
+
+/// Polls `future` once, so that it starts, and returns whether it finished.
+async fn poll_once<F: Future + Unpin>(future: &mut F) -> bool {
+    std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx).is_ready())).await
+}
+
+/// A statement whose caller stops waiting finishes on a spawned task. If
+/// that rest panics inside a transaction, the connection is marked bad:
+/// the statement queued behind it fails with `connection_lost` instead of
+/// running inside the abandoned transaction (and being lost with it when
+/// the connection closes), and nothing of the transaction is committed.
+#[tokio::test(start_paused = true)]
+async fn statement_queued_behind_a_panicked_operation_is_connection_lost() {
+    let (mut db, state) = build_db(1, None, false).await;
+
+    let mut conn = db.connection().await.unwrap();
+    let mut tx = conn.transaction().await.unwrap();
+    toasty::create!(User {
+        name: "alice",
+        age: 30
+    })
+    .exec(&mut tx)
+    .await
+    .unwrap();
+
+    let mut bob = Box::pin(
+        toasty::create!(User {
+            name: "bob",
+            age: 30
+        })
+        .exec(&mut tx),
+    );
+    assert!(!poll_once(&mut bob).await, "the insert is in flight");
+    // The rest of the insert, now on a spawned task, panics once the
+    // driver is done with it.
+    state.exec_panic_tokens.store(1, Ordering::Relaxed);
+    drop(bob);
+
+    let err = toasty::create!(User {
+        name: "carol",
+        age: 30
+    })
+    .exec(&mut tx)
+    .await
+    .unwrap_err();
+    assert!(
+        err.is_connection_lost(),
+        "expected connection_lost, got {err}"
+    );
+    assert_eq!(state.exec_panic_tokens.load(Ordering::Relaxed), 0);
+
+    drop(tx);
+    drop(conn);
+
+    // The bad connection left the pool; a fresh one sees nothing of the
+    // abandoned transaction.
+    let connects_before = state.connects.load(Ordering::Relaxed);
+    assert!(User::all().exec(&mut db).await.unwrap().is_empty());
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects_before + 1);
+}
+
+/// A statement that panics while its caller polls it leaves the connection
+/// marked bad, and the pool replaces it.
+#[tokio::test(start_paused = true)]
+async fn connection_is_replaced_after_a_statement_panics_in_its_caller() {
+    let (db, state) = build_db(1, None, false).await;
+
+    state.exec_panic_tokens.store(1, Ordering::Relaxed);
+    let result = tokio::spawn({
+        let mut db = db.clone();
+        async move {
+            toasty::create!(User {
+                name: "alice",
+                age: 30
+            })
+            .exec(&mut db)
+            .await
+        }
+    })
+    .await;
+    assert!(result.unwrap_err().is_panic());
+
+    let connects_before = state.connects.load(Ordering::Relaxed);
+    let mut db = db;
+    toasty::create!(User {
+        name: "bob",
+        age: 30
+    })
+    .exec(&mut db)
+    .await
+    .unwrap();
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects_before + 1);
 }

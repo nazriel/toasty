@@ -82,10 +82,12 @@ two fields:
 
 The span is created on the task that calls Toasty, so it is parented to
 whatever span is current there — a per-request span created by axum or
-tower middleware, for example. Toasty executes statements on a dedicated
-worker task per pooled connection; the span is carried across to that task
-and entered there, so query events (and everything else Toasty logs during
-execution) land inside the calling request's span tree:
+tower middleware, for example. Toasty executes statements on the calling
+task, but some of the work can run elsewhere: the SQLite driver runs each
+call on Tokio's blocking thread pool, and a statement whose caller stops
+waiting (a dropped future) finishes on a spawned task. The span goes with
+the work in every case, so query events (and everything else Toasty logs
+during execution) land inside the calling request's span tree:
 
 ```text
 DEBUG request{rid=324580}:query{stmt.kind="query" model="User"}: toasty::query: query executed ...

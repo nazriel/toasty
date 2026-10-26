@@ -1,9 +1,9 @@
 mod builder;
 mod connect;
 mod connection;
-mod connection_task;
 mod executor;
 mod pool;
+mod pooled;
 mod tx;
 
 pub use builder::Builder;
@@ -17,7 +17,6 @@ pub use tx::{Transaction, TransactionBuilder};
 /// Response from executing a statement, including pagination metadata.
 pub use toasty_core::driver::ExecResponse;
 
-pub(crate) use connection_task::ConnectionOperation;
 pub(crate) use tx::ConnRef;
 
 use crate::{Result, engine::Engine};

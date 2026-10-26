@@ -1,7 +1,7 @@
 #![cfg(feature = "sqlite")]
 
-//! Tests for the `toasty::query` tracing event and span propagation across
-//! the per-connection worker task.
+//! Tests for the `toasty::query` tracing event and span propagation from the
+//! caller's task to the thread the SQLite driver runs its calls on.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -31,14 +31,16 @@ async fn setup_db(configure: impl FnOnce(&mut toasty::db::Builder)) -> toasty::D
     db
 }
 
-/// One captured tracing event: its metadata, flattened fields, and the
-/// names and fields of every span in scope (root first).
+/// One captured tracing event: its metadata, flattened fields, the names
+/// and fields of every span in scope (root first), and the thread it was
+/// emitted on.
 #[derive(Debug, Clone)]
 struct CapturedEvent {
     target: String,
     level: Level,
     fields: HashMap<String, String>,
     scope: Vec<(String, HashMap<String, String>)>,
+    thread: std::thread::ThreadId,
 }
 
 impl CapturedEvent {
@@ -146,6 +148,7 @@ where
             level: *event.metadata().level(),
             fields: visitor.0,
             scope,
+            thread: std::thread::current().id(),
         });
     }
 }
@@ -288,7 +291,7 @@ async fn params_present_on_slow_query_under_warn_filter() {
 }
 
 /// Regression test for tokio-rs/toasty#1043: driver events must land inside
-/// the caller's span even though the driver runs on a dedicated worker task.
+/// the caller's span even though the driver runs its calls on another thread.
 #[tokio::test]
 async fn query_event_inherits_caller_span() {
     let (events, _guard) = capture();
@@ -316,6 +319,39 @@ async fn query_event_inherits_caller_span() {
     let (_, query_fields) = &ev.scope[1];
     assert_eq!(query_fields["stmt.kind"], "query");
     assert_eq!(query_fields["model"], "User");
+}
+
+/// The engine runs on the caller's task, but every SQLite call still runs on
+/// the blocking pool: on a current-thread runtime the test's thread is the
+/// only runtime worker, and no query event, emitted while its call runs,
+/// comes from it.
+#[tokio::test]
+async fn sqlite_calls_run_off_the_runtime_worker() {
+    let (events, _guard) = capture();
+    let mut db = setup_db(|_| {}).await;
+    let worker = std::thread::current().id();
+
+    toasty::create!(User { name: "Alice" })
+        .exec(&mut db)
+        .await
+        .unwrap();
+    let mut tx = db.transaction().await.unwrap();
+    toasty::create!(User { name: "Bob" })
+        .exec(&mut tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let users = User::filter_by_name("Alice").exec(&mut db).await.unwrap();
+    assert_eq!(users.len(), 1);
+
+    let captured = query_events(&events);
+    assert_eq!(captured.len(), 3, "captured: {captured:#?}");
+    for ev in &captured {
+        assert_ne!(
+            ev.thread, worker,
+            "a SQLite call ran on the runtime worker: {ev:#?}"
+        );
+    }
 }
 
 #[derive(Debug, toasty::Model)]

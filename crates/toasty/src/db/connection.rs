@@ -1,6 +1,6 @@
 use super::Transaction;
-use super::connection_task::{ConnectionHandle, ConnectionOperation};
 use super::pool::Manager;
+use super::pooled::PooledConnection;
 use super::tx::ConnRef;
 
 use async_trait::async_trait;
@@ -15,8 +15,6 @@ use toasty_core::{
     },
     stmt,
 };
-use tokio::sync::oneshot;
-use tracing::Instrument;
 
 /// A dedicated database connection retrieved from a pool.
 ///
@@ -26,14 +24,15 @@ use tracing::Instrument;
 ///
 /// When dropped, the connection is returned to the pool for reuse.
 pub struct Connection {
-    pub(super) inner: deadpool::managed::Object<Manager>,
+    /// Always `Some` until `drop`.
+    pub(super) inner: Option<deadpool::managed::Object<Manager>>,
     pub(super) shared: Arc<super::Shared>,
 }
 
 impl Connection {
-    /// Access the underlying connection handle.
-    pub(crate) fn handle(&self) -> &ConnectionHandle {
-        &self.inner
+    /// Access the underlying pooled connection.
+    pub(crate) fn pooled(&self) -> &PooledConnection {
+        self.inner.as_ref().expect("connection used after drop")
     }
 
     /// Returns the compiled schema used by this connection.
@@ -46,55 +45,21 @@ impl Connection {
         stmt: stmt::Statement,
         in_transaction: bool,
     ) -> crate::Result<ExecResponse> {
-        // Created on the caller's task so the span parents to the caller's
-        // current span; the worker task enters it while executing.
+        // Created before the statement moves into the pooled connection's
+        // operation, so the span parents to the caller's current span.
         let span = crate::instrument::query_span(&self.shared.engine.schema, &stmt);
-
-        let (tx, rx) = oneshot::channel();
-
-        self.handle()
-            .in_tx
-            .send(ConnectionOperation::ExecStatement {
-                stmt: Box::new(stmt),
-                in_transaction,
-                span: span.clone(),
-                tx,
-            })
-            .unwrap();
-
-        rx.instrument(span).await.unwrap()
+        self.pooled()
+            .exec_statement(stmt, in_transaction, span)
+            .await
     }
 
     pub(crate) async fn exec_operation(&self, operation: Operation) -> crate::Result<ExecResponse> {
-        let (tx, rx) = oneshot::channel();
-
-        self.handle()
-            .in_tx
-            .send(ConnectionOperation::ExecOperation {
-                operation: Box::new(operation),
-                span: tracing::Span::current(),
-                tx,
-            })
-            .unwrap();
-
-        rx.await.unwrap()
+        self.pooled().exec_operation(operation).await
     }
 
     pub(crate) async fn exec_raw_sql(&self, raw: RawSql) -> crate::Result<ExecResponse> {
         let span = crate::instrument::raw_sql_span();
-
-        let (tx, rx) = oneshot::channel();
-
-        self.handle()
-            .in_tx
-            .send(ConnectionOperation::ExecRawSql {
-                raw: Box::new(raw),
-                span: span.clone(),
-                tx,
-            })
-            .unwrap();
-
-        rx.instrument(span).await.unwrap()
+        self.pooled().exec_raw_sql(raw, span).await
     }
 
     /// Begin a transaction on this connection.
@@ -119,28 +84,12 @@ impl Connection {
     /// Creates tables and indices defined in the schema on the database.
     pub async fn push_schema(&self) -> crate::Result<()> {
         tracing::info!("pushing schema to database");
-        let (tx, rx) = oneshot::channel();
-        self.handle()
-            .in_tx
-            .send(ConnectionOperation::PushSchema {
-                span: tracing::Span::current(),
-                tx,
-            })
-            .unwrap();
-        rx.await.unwrap()
+        self.pooled().push_schema().await
     }
 
     #[cfg(feature = "migration")]
     pub(crate) async fn applied_migrations(&self) -> crate::Result<Vec<AppliedMigration>> {
-        let (tx, rx) = oneshot::channel();
-        self.handle()
-            .in_tx
-            .send(ConnectionOperation::AppliedMigrations {
-                span: tracing::Span::current(),
-                tx,
-            })
-            .unwrap();
-        rx.await.unwrap()
+        self.pooled().applied_migrations().await
     }
 
     #[cfg(feature = "migration")]
@@ -150,18 +99,9 @@ impl Connection {
         name: &str,
         migration: Migration,
     ) -> crate::Result<()> {
-        let (tx, rx) = oneshot::channel();
-        self.handle()
-            .in_tx
-            .send(ConnectionOperation::ApplyMigration {
-                id,
-                name: name.to_owned(),
-                migration: Box::new(migration),
-                span: tracing::Span::current(),
-                tx,
-            })
-            .unwrap();
-        rx.await.unwrap()
+        self.pooled()
+            .apply_migration(id, name.to_owned(), migration)
+            .await
     }
 }
 
@@ -194,7 +134,19 @@ impl super::Executor for Connection {
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Connection")
-            .field("handle", &*self.inner)
+            .field("connection", self.pooled())
             .finish()
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // A connection that went bad leaves the pool here instead of
+        // waiting in the idle set for `recycle` to find it. The pool's
+        // sweep, woken by the same failure, then counts and pings only
+        // connections that may still be good.
+        if let Some(inner) = self.inner.take_if(|inner| inner.is_invalid()) {
+            let _ = deadpool::managed::Object::take(inner);
+        }
     }
 }

@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use crate::{Result, db::ConnectionOperation, db::Executor};
+use crate::{Result, db::Executor};
 
 use async_trait::async_trait;
 use toasty_core::{
@@ -12,7 +12,6 @@ use toasty_core::{
         operation::{self, IsolationLevel, RawSql, TransactionMode},
     },
 };
-use tokio::sync::oneshot;
 
 /// Either a `&mut Db` or `&mut Connection`, used by [`TransactionBuilder`] to
 /// defer connection acquisition until [`begin`](TransactionBuilder::begin).
@@ -224,18 +223,10 @@ impl Drop for Transaction<'_> {
                 None => operation::Transaction::Rollback,
             };
 
-            // Fire-and-forget rollback: send the operation to the background
-            // connection task without awaiting the response.
-            let (tx, _rx) = oneshot::channel();
-            let _ = self
-                .conn
-                .handle()
-                .in_tx
-                .send(ConnectionOperation::ExecOperation {
-                    operation: Box::new(op.into()),
-                    span: tracing::Span::current(),
-                    tx,
-                });
+            // Fire-and-forget rollback: queue the operation on the connection
+            // without awaiting the response. It runs before anything else
+            // reaches the connection.
+            self.conn.pooled().defer(op.into());
         }
     }
 }

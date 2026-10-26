@@ -11,7 +11,7 @@ use std::{
 use toasty_core::driver::{Capability, ConnectContext, Driver, QueryLogConfig};
 use tokio::{sync::Notify, task::JoinHandle};
 
-use super::connection_task::{ConnectionHandle, ConnectionOperation};
+use super::pooled::PooledConnection;
 use crate::engine::Engine;
 
 /// Get the default maximum size of a pool, which is `cpu_core_count * 2`
@@ -142,7 +142,7 @@ impl Pool {
             toasty_core::Error::connection_pool(e)
         })?;
         Ok(super::Connection {
-            inner: connection,
+            inner: Some(connection),
             shared,
         })
     }
@@ -201,7 +201,7 @@ impl std::fmt::Debug for Manager {
 }
 
 impl deadpool::managed::Manager for Manager {
-    type Type = ConnectionHandle;
+    type Type = PooledConnection;
     type Error = crate::Error;
 
     async fn create(&self) -> Result<Self::Type, Self::Error> {
@@ -213,7 +213,7 @@ impl deadpool::managed::Manager for Manager {
             .inspect_err(|e| {
                 tracing::debug!(error = %e, "failed to create database connection");
             })?;
-        Ok(ConnectionHandle::spawn(
+        Ok(PooledConnection::new(
             connection,
             self.engine.clone(),
             self.sweep_waker.clone(),
@@ -250,39 +250,17 @@ impl deadpool::managed::Manager for Manager {
                 "connection exceeded max idle time",
             ));
         }
-        if obj.in_tx.is_closed() || obj.is_finished() {
+        if obj.is_invalid() {
             tracing::debug!("discarding dead pooled connection");
             return Err(deadpool::managed::RecycleError::message(
-                "background task is no longer running",
+                "connection is no longer valid",
             ));
         }
-        if self.pre_ping {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let ping = ConnectionOperation::Ping {
-                span: tracing::Span::current(),
-                tx,
-            };
-            if obj.in_tx.send(ping).is_err() {
-                tracing::debug!("pre-ping channel closed; discarding pooled connection");
-                return Err(deadpool::managed::RecycleError::message(
-                    "background task is no longer running",
-                ));
-            }
-            match rx.await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    tracing::debug!(error = %err, "pre-ping failed; discarding pooled connection");
-                    return Err(deadpool::managed::RecycleError::Backend(err));
-                }
-                Err(_) => {
-                    tracing::debug!(
-                        "pre-ping response channel dropped; discarding pooled connection"
-                    );
-                    return Err(deadpool::managed::RecycleError::message(
-                        "background task exited during pre-ping",
-                    ));
-                }
-            }
+        if self.pre_ping
+            && let Err(err) = obj.ping().await
+        {
+            tracing::debug!(error = %err, "pre-ping failed; discarding pooled connection");
+            return Err(deadpool::managed::RecycleError::Backend(err));
         }
         tracing::trace!("recycling pooled connection");
         Ok(())
@@ -376,8 +354,9 @@ impl SweepTask {
             // on the next tick.
             drop(conn);
         } else {
-            // Failed — detach the slot from the pool. The task has
-            // already exited (respond closed the channel).
+            // Failed — detach the slot from the pool. Dropping it closes
+            // the connection once an operation still running on it (a
+            // timed-out ping) finishes.
             let _ = Object::take(conn);
             self.escalate().await;
         }
@@ -427,25 +406,19 @@ impl SweepTask {
         self.pool.timeout_get(&timeouts).await.ok()
     }
 
-    /// Send a `Ping` operation through the connection task, bounded by
-    /// `DEFAULT_SWEEP_PING_TIMEOUT`. Returns `true` iff the ping reported a
-    /// healthy connection.
-    async fn ping_conn(handle: &ConnectionHandle) -> bool {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let ping = ConnectionOperation::Ping {
-            span: tracing::Span::current(),
-            tx,
-        };
-        if handle.in_tx.send(ping).is_err() {
+    /// Ping the connection, bounded by `DEFAULT_SWEEP_PING_TIMEOUT`, which
+    /// includes waiting for an operation still running on it. Returns `true`
+    /// iff the ping reported a healthy connection.
+    async fn ping_conn(conn: &PooledConnection) -> bool {
+        if conn.is_invalid() {
             return false;
         }
-        match tokio::time::timeout(DEFAULT_SWEEP_PING_TIMEOUT, rx).await {
-            Ok(Ok(Ok(()))) => true,
-            Ok(Ok(Err(err))) => {
+        match tokio::time::timeout(DEFAULT_SWEEP_PING_TIMEOUT, conn.ping()).await {
+            Ok(Ok(())) => true,
+            Ok(Err(err)) => {
                 tracing::debug!(error = %err, "sweep ping failed; discarding pooled connection");
                 false
             }
-            Ok(Err(_)) => false, // connection task dropped tx
             Err(_) => {
                 tracing::debug!("sweep ping timed out; discarding pooled connection");
                 false

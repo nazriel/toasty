@@ -1,11 +1,12 @@
 //! Tracing spans for statement execution.
 //!
-//! Statements execute on a dedicated per-connection worker task, so a span
-//! entered by the caller does not naturally cover the driver's work. The
-//! spans created here are constructed on the caller's task — parenting them
-//! to the caller's current span (e.g. a per-request span) — then carried
-//! across the channel to the worker task and entered there, so every event
-//! the engine and driver emit lands inside the caller's span tree.
+//! Statements execute on the caller's task, but not always there alone: an
+//! operation whose caller stops waiting finishes on a spawned task, and the
+//! SQLite driver runs each call on the blocking thread pool. The spans
+//! created here are constructed on the caller's task — parenting them to the
+//! caller's current span (e.g. a per-request span) — and the operation
+//! carries its span wherever it runs, so every event the engine and driver
+//! emit lands inside the caller's span tree.
 
 use toasty_core::{
     Schema,
@@ -16,8 +17,8 @@ use toasty_core::{
 /// Creates the `toasty::query` span for one statement execution.
 ///
 /// When the span is disabled by the subscriber's filter, returns the
-/// caller's current span instead so request context still reaches the
-/// worker task's events.
+/// caller's current span instead so request context still reaches events
+/// emitted off the caller's task.
 pub(crate) fn query_span(schema: &Schema, stmt: &stmt::Statement) -> tracing::Span {
     let span = tracing::debug_span!(
         target: "toasty::query",

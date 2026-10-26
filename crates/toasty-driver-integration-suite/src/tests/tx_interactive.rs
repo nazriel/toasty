@@ -1,6 +1,8 @@
 use crate::Fault;
 use crate::prelude::*;
 
+use std::{future::Future, pin::Pin, task::Poll};
+
 use toasty_core::driver::{Operation, operation::IsolationLevel, operation::Transaction};
 
 // ===== Basic commit / rollback =====
@@ -125,7 +127,13 @@ pub async fn rollback_failure_retries_before_connection_reuse(t: &mut Test) -> R
     Ok(())
 }
 
-/// Cancelling a queued commit keeps the connection reusable.
+/// Polls `future` once, so that it starts, and returns whether it finished.
+async fn poll_once<F: Future + Unpin>(future: &mut F) -> bool {
+    std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx).is_ready())).await
+}
+
+/// Cancelling a commit once it reached the connection keeps the connection
+/// reusable.
 #[driver_test(requires(sql))]
 pub async fn cancel_queued_commit_keeps_connection_reusable(t: &mut Test) -> Result<()> {
     #[derive(Debug, toasty::Model)]
@@ -141,19 +149,125 @@ pub async fn cancel_queued_commit_keeps_connection_reusable(t: &mut Test) -> Res
     let tx = db.transaction().await?;
     let mut commit = Box::pin(tx.commit());
 
-    tokio::select! {
-        biased;
-        _ = async {
-            while t.log().len() < 2 {
-                tokio::task::yield_now().await;
-            }
-        } => {}
-        result = &mut commit => panic!("commit completed before cancellation: {result:?}"),
-    }
+    // One poll hands the commit to the driver; the caller then stops
+    // waiting for it.
+    assert!(!poll_once(&mut commit).await, "the commit is in flight");
     drop(commit);
 
     let tx = db.transaction().await?;
     tx.rollback().await?;
+
+    // The cancelled commit still ran, after its transaction's start.
+    assert_struct!(
+        t.log().pop_op(),
+        Operation::Transaction(Transaction::Start {
+            isolation: None,
+            read_only: false,
+            ..
+        })
+    );
+    assert_struct!(
+        t.log().pop_op(),
+        Operation::Transaction(Transaction::Commit)
+    );
+
+    Ok(())
+}
+
+/// A statement whose caller stops waiting for it still runs, in the order it
+/// was issued: after the statements before it and before the ones after it.
+#[driver_test(requires(sql))]
+pub async fn cancelled_statement_in_transaction_runs_in_order(t: &mut Test) -> Result<()> {
+    #[derive(Debug, toasty::Model)]
+    struct Item {
+        #[key]
+        #[auto]
+        id: i64,
+        name: String,
+    }
+
+    let mut db = t.setup_db(models!(Item)).await;
+
+    let mut tx = db.transaction().await?;
+    Item::create().name("first").exec(&mut tx).await?;
+    {
+        let mut second = Box::pin(Item::create().name("second").exec(&mut tx));
+        assert!(!poll_once(&mut second).await, "the insert is in flight");
+    }
+    Item::create().name("third").exec(&mut tx).await?;
+    tx.commit().await?;
+
+    let mut items = Item::all().exec(&mut db).await?;
+    items.sort_by_key(|item| item.id);
+    let names: Vec<_> = items.iter().map(|item| &item.name[..]).collect();
+    assert_eq!(names, ["first", "second", "third"]);
+
+    Ok(())
+}
+
+/// A transaction dropped while one of its statements is in flight rolls
+/// back once that statement is done, and before the connection's next
+/// statement.
+#[driver_test(requires(sql))]
+pub async fn dropped_transaction_with_cancelled_statement_rolls_back(t: &mut Test) -> Result<()> {
+    #[derive(Debug, toasty::Model)]
+    struct Item {
+        #[key]
+        #[auto]
+        id: i64,
+        name: String,
+    }
+
+    let db = t.setup_db(models!(Item)).await;
+    let mut conn = db.connection().await?;
+
+    {
+        let mut tx = conn.transaction().await?;
+        Item::create().name("first").exec(&mut tx).await?;
+        let mut second = Box::pin(Item::create().name("second").exec(&mut tx));
+        assert!(!poll_once(&mut second).await, "the insert is in flight");
+        // `second`, then `tx`, drop here: neither finished.
+    }
+
+    assert!(Item::all().exec(&mut conn).await?.is_empty());
+
+    Item::create().name("third").exec(&mut conn).await?;
+    let items = Item::all().exec(&mut conn).await?;
+    let names: Vec<_> = items.iter().map(|item| &item.name[..]).collect();
+    assert_eq!(names, ["third"]);
+
+    Ok(())
+}
+
+/// A statement the engine wraps in a transaction of its own runs to its
+/// commit even if its caller stops waiting after the first operation.
+#[driver_test(
+    requires(sql),
+    scenario(crate::scenarios::has_many_belongs_to::id_uuid)
+)]
+pub async fn cancelled_nested_create_still_commits(t: &mut Test) -> Result<()> {
+    let mut db = setup(t).await;
+
+    t.log().clear();
+    {
+        let mut create = Box::pin(
+            User::create()
+                .name("Ann Chovey")
+                .todos([Todo::create().title("Make pizza")])
+                .exec(&mut db),
+        );
+        assert!(!poll_once(&mut create).await, "the create is in flight");
+    }
+
+    let users = User::all().exec(&mut db).await?;
+    assert_eq!(users.len(), 1);
+    let todos = users[0].todos().exec(&mut db).await?;
+    assert_eq!(todos.len(), 1);
+
+    assert!(matches!(
+        t.log().pop_op(),
+        Operation::Transaction(Transaction::Start { .. })
+    ));
 
     Ok(())
 }
