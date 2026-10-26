@@ -260,6 +260,10 @@ impl Connection for InstrumentedConnection {
         self.valid.load(Ordering::Acquire) && self.inner.is_valid()
     }
 
+    fn in_transaction(&self) -> Option<bool> {
+        self.inner.in_transaction()
+    }
+
     async fn ping(&mut self) -> Result<()> {
         // Consume a queued fault before delegating, mirroring `exec`.
         // A `ConnectionLost` fault here lets tests target the sweep's

@@ -17,6 +17,15 @@
 //! | PostgreSQL | `DollarNumber` (`$1`, `$2`, ...) |
 //! | MySQL | `QuestionMark` (`?`, `?`, ...) |
 //!
+//! # Transactions
+//!
+//! Raw SQL must not control transactions. Open them with
+//! [`Db::transaction`](crate::Db::transaction) or a transaction builder, and
+//! run raw SQL through the resulting [`Transaction`](crate::Transaction). A
+//! `BEGIN` sent as raw SQL leaves the connection inside a transaction that no
+//! `Transaction` owns; the pool then discards the connection, and the next
+//! operation on it fails with a connection-lost error.
+//!
 //! # Statements
 //!
 //! ```ignore

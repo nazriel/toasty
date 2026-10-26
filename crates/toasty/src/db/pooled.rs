@@ -20,12 +20,12 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll, ready},
 };
 
-use toasty_core::driver::operation::{Operation, RawSql};
+use toasty_core::driver::operation::{Operation, RawSql, Transaction};
 use toasty_core::driver::{Connection, ExecResponse, Rows};
 #[cfg(feature = "migration")]
 use toasty_core::schema::db::{AppliedMigration, Migration};
@@ -54,8 +54,17 @@ struct Slot {
     /// Incremented after the push, while `deferred` is still locked.
     deferred_queued: AtomicU64,
 
+    /// How many [`Transaction`](super::Transaction) handles on this
+    /// connection are alive (see [`PooledConnection::own_transaction`]).
+    transactions: AtomicUsize,
+
     /// Set once the connection went bad; the pool's `recycle` evicts it.
     invalid: AtomicBool,
+
+    /// Set before `invalid` when the connection went bad because it was left
+    /// inside a transaction that no live [`Transaction`](super::Transaction)
+    /// owns, so that later operations can say so.
+    unowned_transaction: AtomicBool,
 
     /// Woken when the connection goes bad, so the pool's health-check sweep
     /// can escalate immediately rather than waiting for its next periodic
@@ -86,7 +95,9 @@ impl PooledConnection {
                 engine,
                 deferred: std::sync::Mutex::new(VecDeque::new()),
                 deferred_queued: AtomicU64::new(0),
+                transactions: AtomicUsize::new(0),
                 invalid: AtomicBool::new(false),
+                unowned_transaction: AtomicBool::new(false),
                 sweep_waker,
             }),
         }
@@ -131,6 +142,10 @@ impl PooledConnection {
 
     /// Execute user-authored SQL through the engine's SQL capability guard,
     /// inside `span`.
+    ///
+    /// Raw SQL does not control transactions: a `BEGIN` sent through here
+    /// leaves the connection in a transaction no [`Transaction`](super::Transaction)
+    /// owns, and the slot is discarded (see [`Connection::in_transaction`]).
     pub(crate) async fn exec_raw_sql(
         &self,
         raw: RawSql,
@@ -235,6 +250,21 @@ impl PooledConnection {
         }
     }
 
+    /// Registers a [`Transaction`](super::Transaction) handle on this
+    /// connection, for as long as the returned guard lives. The transaction
+    /// takes it before it sends its `BEGIN`, so a transaction the driver
+    /// reports open is owned whenever a handle exists for it.
+    ///
+    /// After an operation, a driver that reports itself inside a transaction
+    /// while no handle is alive, and no deferred rollback is left to end it,
+    /// is in a transaction nobody owns: the slot is marked bad.
+    pub(crate) fn own_transaction(&self) -> TransactionOwner {
+        self.slot.transactions.fetch_add(1, Ordering::AcqRel);
+        TransactionOwner {
+            slot: self.slot.clone(),
+        }
+    }
+
     /// Runs `operation` on the caller's task, to completion even if the
     /// caller stops waiting for it.
     fn run<F>(&self, operation: F) -> RunToCompletion<F>
@@ -247,6 +277,18 @@ impl PooledConnection {
             polling: false,
             slot: self.slot.clone(),
         }
+    }
+}
+
+/// Keeps a connection's transaction count up while a
+/// [`Transaction`](super::Transaction) handle is alive.
+pub(crate) struct TransactionOwner {
+    slot: Arc<Slot>,
+}
+
+impl Drop for TransactionOwner {
+    fn drop(&mut self) {
+        self.slot.transactions.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -276,7 +318,7 @@ impl Slot {
         // opened. A statement run now could land in that transaction and be
         // lost with it when the connection closes.
         if self.invalid.load(Ordering::Acquire) {
-            return Err(connection_went_bad());
+            return Err(self.went_bad());
         }
 
         let mut locked = Locked { slot: self, held };
@@ -289,6 +331,10 @@ impl Slot {
                 .pop_front()
                 .expect("a counted deferred operation is queued");
             locked.held.deferred_run += 1;
+            let is_savepoint_rollback = matches!(
+                operation,
+                Operation::Transaction(Transaction::RollbackToSavepoint(_))
+            );
             let result = locked
                 .held
                 .connection
@@ -296,15 +342,46 @@ impl Slot {
                 .instrument(span)
                 .await;
             if let Err(err) = result {
-                tracing::debug!(error = %err, "deferred operation failed");
+                // A rollback that fails because no transaction is active (the
+                // stray one after a cancelled `COMMIT`) is harmless. One that
+                // fails while the driver is still in the transaction, or
+                // cannot tell, leaves the connection where the next caller
+                // would join it.
+                //
+                // A failed `ROLLBACK TO SAVEPOINT` is left alone: the
+                // transaction around the savepoint is still owned, by its live
+                // handle or by the rollback it has queued, and the savepoint
+                // may never have existed (a cancelled `RELEASE`, a failed
+                // `SAVEPOINT`). If that transaction is left behind,
+                // `Locked::drop` finds it.
+                if locked.held.connection.in_transaction() == Some(false) || is_savepoint_rollback {
+                    tracing::debug!(error = %err, "deferred operation failed");
+                } else {
+                    tracing::debug!(
+                        error = %err,
+                        "deferred rollback failed inside a transaction; discarding connection"
+                    );
+                    self.invalidate_unowned_transaction();
+                    return Err(self.went_bad());
+                }
             }
             if !locked.held.connection.is_valid() {
                 // `locked` marks the slot as it drops.
-                return Err(connection_went_bad());
+                return Err(self.went_bad());
             }
         }
 
         Ok(locked)
+    }
+
+    /// Whether the connection is inside a transaction that no live
+    /// [`Transaction`](super::Transaction) handle owns and that no queued
+    /// deferred operation is left to end. Only a driver that reports its
+    /// transaction state can be found in one.
+    fn in_unowned_transaction(&self, held: &Held) -> bool {
+        self.transactions.load(Ordering::Acquire) == 0
+            && held.deferred_run == self.deferred_queued.load(Ordering::Acquire)
+            && held.connection.in_transaction() == Some(true)
     }
 
     /// Marks the connection bad. The first time, also wakes the pool's
@@ -316,6 +393,24 @@ impl Slot {
         if !self.invalid.swap(true, Ordering::AcqRel) {
             self.sweep_waker.wake();
         }
+    }
+
+    /// Marks the connection bad because it is left inside a transaction that
+    /// nobody owns, and records that for the error later operations get.
+    fn invalidate_unowned_transaction(&self) {
+        self.unowned_transaction.store(true, Ordering::Release);
+        self.invalidate();
+    }
+
+    /// The error for an operation on a connection that went bad before it.
+    fn went_bad(&self) -> crate::Error {
+        let reason = if self.unowned_transaction.load(Ordering::Acquire) {
+            "the connection was left inside a transaction that no Transaction owns \
+             (a rollback failed, or transaction control was sent as raw SQL)"
+        } else {
+            "the connection went bad while an earlier operation used it"
+        };
+        toasty_core::Error::connection_lost(std::io::Error::other(reason))
     }
 }
 
@@ -353,15 +448,14 @@ impl Drop for Locked<'_> {
         } else if !self.held.connection.is_valid() {
             tracing::debug!("connection reported invalid; discarding it");
             self.slot.invalidate();
+        } else if self.slot.in_unowned_transaction(&self.held) {
+            // A dropped transaction's rollback failed, or a plan's own
+            // `COMMIT` did: the next caller would read the transaction's
+            // uncommitted rows and write into it.
+            tracing::debug!("connection left inside a transaction nobody owns; discarding it");
+            self.slot.invalidate_unowned_transaction();
         }
     }
-}
-
-/// The error for an operation on a connection that went bad before it.
-fn connection_went_bad() -> crate::Error {
-    toasty_core::Error::connection_lost(std::io::Error::other(
-        "the connection went bad while an earlier operation used it",
-    ))
 }
 
 /// A connection operation that runs on the caller's task while the caller

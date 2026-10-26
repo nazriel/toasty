@@ -301,6 +301,10 @@ fn exec_sql_inner(
 
 #[async_trait]
 impl toasty_core::driver::Connection for Connection {
+    fn in_transaction(&self) -> Option<bool> {
+        Some(self.connection.in_transaction())
+    }
+
     async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<ExecResponse> {
         tracing::trace!(driver = "sqlite", op = %op.name(), "driver exec");
 

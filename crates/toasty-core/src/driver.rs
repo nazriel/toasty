@@ -216,6 +216,37 @@ pub trait Connection: Debug + Send + 'static {
         true
     }
 
+    /// Cheap, synchronous, local report of whether the session is inside a
+    /// transaction right now, as of the last operation that ran on it.
+    ///
+    /// Returns `Some(true)` while a transaction (or a savepoint's enclosing
+    /// transaction) is open, `Some(false)` when none is, and `None` when the
+    /// driver cannot tell. The default returns `None`.
+    ///
+    /// The pool uses the answer to keep a connection out of reuse while it
+    /// sits in a transaction that no live `Transaction` handle owns: the
+    /// rollback of a dropped handle failed, or the engine's
+    /// own `COMMIT` for a multi-statement plan did. A later caller would
+    /// otherwise read that transaction's uncommitted rows and write into it.
+    /// After a failed rollback, `None` is treated like `Some(true)`: the
+    /// driver cannot say the connection is clean, so the pool discards it.
+    ///
+    /// The pool counts the live `Transaction` handles on a connection, not
+    /// the transactions the driver has open: it cannot tell a handle's own
+    /// transaction from another one begun beside it. It relies on the driver's
+    /// `BEGIN` failing inside an open transaction (SQLite's does), and treats
+    /// transaction control sent as raw SQL as unowned.
+    ///
+    /// Implementations must not block and must not perform I/O. A driver
+    /// whose client library tracks the transaction state itself reads it
+    /// when this is called; a driver that would have to ask the database
+    /// records the state as each operation finishes (the SQLite driver reads
+    /// `is_autocommit()` inside the blocking call that ran the operation, so
+    /// that this method makes no SQLite call on the caller's thread).
+    fn in_transaction(&self) -> Option<bool> {
+        None
+    }
+
     /// Active liveness probe. The pool's background health-check sweep
     /// calls this on the longest-idle connection on every tick, and on
     /// every other idle connection when an escalation is triggered.

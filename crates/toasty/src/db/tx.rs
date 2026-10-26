@@ -2,7 +2,10 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use crate::{Result, db::Executor};
+use crate::{
+    Result,
+    db::{Executor, pooled::TransactionOwner},
+};
 
 use async_trait::async_trait;
 use toasty_core::{
@@ -85,6 +88,12 @@ impl<'a> TransactionBuilder<'a> {
 /// If dropped without calling [`commit`](Self::commit) or
 /// [`rollback`](Self::rollback), the transaction is automatically rolled back.
 pub struct Transaction<'a> {
+    /// Tells the pool this transaction is alive, so that a connection inside
+    /// it is not mistaken for one inside a transaction nobody owns. Declared
+    /// above `conn`, so it is released before an owned connection returns to
+    /// the pool, and after the rollback is queued in [`Drop`].
+    _owner: TransactionOwner,
+
     /// The connection this transaction operates on.
     conn: ConnRef<'a>,
 
@@ -150,6 +159,7 @@ impl<'a> Transaction<'a> {
         // future is cancelled while waiting on the response of the start command, the transaction
         // is still rolled back.
         let tx = Transaction {
+            _owner: conn.pooled().own_transaction(),
             conn,
             finalized: false,
             savepoint: None,
@@ -241,6 +251,7 @@ impl<'a> Executor for Transaction<'a> {
         tracing::debug!(depth = depth, "creating nested transaction (savepoint)");
 
         let transaction = Transaction {
+            _owner: self.conn.pooled().own_transaction(),
             conn: ConnRef::Borrowed(&mut self.conn),
             finalized: false,
             savepoint: Some(depth),

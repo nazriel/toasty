@@ -13,7 +13,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU8, AtomicU32, Ordering},
     },
     task::Poll,
     time::Duration,
@@ -23,7 +23,10 @@ use async_trait::async_trait;
 use tempfile::TempDir;
 use toasty_core::{
     Result, Schema,
-    driver::{Capability, ConnectContext, Connection, Driver, ExecResponse, Operation},
+    driver::{
+        Capability, ConnectContext, Connection, Driver, ExecResponse, Operation,
+        operation::Transaction,
+    },
     schema::{
         db::{AppliedMigration, Migration},
         diff,
@@ -46,8 +49,24 @@ struct MockState {
     exec_fail_tokens: AtomicU32,
     /// Each token makes one `exec` panic once the inner driver is done.
     exec_panic_tokens: AtomicU32,
+    /// Each token makes one `ROLLBACK` or `ROLLBACK TO SAVEPOINT` fail
+    /// without reaching the inner driver, so its transaction stays open.
+    rollback_fail_tokens: AtomicU32,
+    /// Each token makes one `COMMIT` fail without reaching the inner driver.
+    commit_fail_tokens: AtomicU32,
+    /// How many `ROLLBACK`s were attempted, failed or not.
+    rollbacks: AtomicU32,
+    /// What `in_transaction` answers: one of the `REPORT_*` values.
+    in_transaction_report: AtomicU8,
     connects: AtomicU32,
 }
+
+/// `in_transaction` answers what SQLite says.
+const REPORT_INNER: u8 = 0;
+/// `in_transaction` answers `Some(false)`, whatever SQLite says.
+const REPORT_NOT_IN_TRANSACTION: u8 = 1;
+/// `in_transaction` answers `None`, as a driver that cannot tell does.
+const REPORT_UNKNOWN: u8 = 2;
 
 #[derive(Debug)]
 struct MockDriver {
@@ -120,6 +139,26 @@ impl Connection for MockConnection {
                 "mock exec failure",
             )));
         }
+        if let Operation::Transaction(tx) = &op {
+            if matches!(tx, Transaction::Rollback) {
+                self.state.rollbacks.fetch_add(1, Ordering::Relaxed);
+            }
+            let tokens = match tx {
+                Transaction::Rollback | Transaction::RollbackToSavepoint(_) => {
+                    Some(&self.state.rollback_fail_tokens)
+                }
+                Transaction::Commit => Some(&self.state.commit_fail_tokens),
+                _ => None,
+            };
+            if let Some(tokens) = tokens
+                && tokens.load(Ordering::Relaxed) > 0
+            {
+                tokens.fetch_sub(1, Ordering::Relaxed);
+                return Err(toasty_core::Error::driver_operation_failed(
+                    std::io::Error::other("mock transaction failure"),
+                ));
+            }
+        }
         let response = self.inner.exec(schema, op).await;
         if self.state.exec_panic_tokens.load(Ordering::Relaxed) > 0 {
             self.state.exec_panic_tokens.fetch_sub(1, Ordering::Relaxed);
@@ -130,6 +169,14 @@ impl Connection for MockConnection {
 
     fn is_valid(&self) -> bool {
         self.valid && self.inner.is_valid()
+    }
+
+    fn in_transaction(&self) -> Option<bool> {
+        match self.state.in_transaction_report.load(Ordering::Relaxed) {
+            REPORT_NOT_IN_TRANSACTION => Some(false),
+            REPORT_UNKNOWN => None,
+            _ => self.inner.in_transaction(),
+        }
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -620,6 +667,226 @@ async fn statement_queued_behind_a_panicked_operation_is_connection_lost() {
     let connects_before = state.connects.load(Ordering::Relaxed);
     assert!(User::all().exec(&mut db).await.unwrap().is_empty());
     assert_eq!(state.connects.load(Ordering::Relaxed), connects_before + 1);
+}
+
+/// Writes a row in a transaction that is dropped while its rollback fails
+/// (the driver's next `ROLLBACK` never reaches SQLite, so the transaction
+/// stays open), with the driver answering `in_transaction` as `report` says.
+/// Then reads on the same connection.
+///
+/// Returns the read's result, the pool and the number of connections opened
+/// before the read.
+async fn read_after_failed_rollback(
+    report: u8,
+) -> (toasty::Db, Arc<MockState>, toasty::Result<usize>, u32) {
+    let (db, state) = build_db(1, None, false).await;
+    state.in_transaction_report.store(report, Ordering::Relaxed);
+
+    let mut conn = db.connection().await.unwrap();
+    let mut tx = conn.transaction().await.unwrap();
+    toasty::create!(User {
+        name: "alice",
+        age: 30
+    })
+    .exec(&mut tx)
+    .await
+    .unwrap();
+
+    state.rollback_fail_tokens.store(1, Ordering::Relaxed);
+    drop(tx);
+
+    let read = User::all().exec(&mut conn).await.map(|users| users.len());
+    assert_eq!(state.rollback_fail_tokens.load(Ordering::Relaxed), 0);
+    drop(conn);
+
+    let connects = state.connects.load(Ordering::Relaxed);
+    (db, state, read, connects)
+}
+
+/// A dropped transaction whose rollback fails, with the driver still inside
+/// it, leaves the connection bad: the next operation on it fails with
+/// `connection_lost` instead of reading the transaction's uncommitted row,
+/// and the pool replaces the connection, which sees nothing of it.
+#[tokio::test(start_paused = true)]
+async fn failed_deferred_rollback_in_a_transaction_discards_the_connection() {
+    let (mut db, state, read, connects) = read_after_failed_rollback(REPORT_INNER).await;
+
+    let err = read.unwrap_err();
+    assert!(
+        err.is_connection_lost(),
+        "expected connection_lost, got {err}"
+    );
+
+    assert!(User::all().exec(&mut db).await.unwrap().is_empty());
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects + 1);
+}
+
+/// A rollback that fails with the driver outside any transaction (the stray
+/// rollback after a cancelled `COMMIT`) is harmless: the connection stays in
+/// the pool.
+#[tokio::test(start_paused = true)]
+async fn failed_deferred_rollback_outside_a_transaction_keeps_the_connection() {
+    let (mut db, state, read, connects) =
+        read_after_failed_rollback(REPORT_NOT_IN_TRANSACTION).await;
+
+    // The mock reports no transaction while SQLite is still inside one, so
+    // the read sees the row.
+    assert_eq!(read.unwrap(), 1);
+
+    User::all().exec(&mut db).await.unwrap();
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects);
+}
+
+/// A driver that cannot tell whether it is inside a transaction is assumed to
+/// be: a failed deferred rollback discards the connection.
+#[tokio::test(start_paused = true)]
+async fn failed_deferred_rollback_on_a_driver_that_cannot_tell_discards_the_connection() {
+    let (mut db, state, read, connects) = read_after_failed_rollback(REPORT_UNKNOWN).await;
+
+    let err = read.unwrap_err();
+    assert!(
+        err.is_connection_lost(),
+        "expected connection_lost, got {err}"
+    );
+
+    User::all().exec(&mut db).await.unwrap();
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects + 1);
+}
+
+/// A plan the engine wraps in its own transaction, whose `COMMIT` fails:
+/// the engine rolls back, returns the commit's error, and the connection,
+/// outside any transaction again, stays in the pool without the batch's rows.
+#[tokio::test(start_paused = true)]
+async fn failed_plan_commit_is_rolled_back() {
+    let (mut db, state) = build_db(1, None, false).await;
+    let mut conn = db.connection().await.unwrap();
+    let connects = state.connects.load(Ordering::Relaxed);
+    let rollbacks = state.rollbacks.load(Ordering::Relaxed);
+
+    state.commit_fail_tokens.store(1, Ordering::Relaxed);
+    let err = toasty::batch((
+        toasty::create!(User {
+            name: "alice",
+            age: 30
+        }),
+        toasty::create!(User {
+            name: "bob",
+            age: 30
+        }),
+    ))
+    .exec(&mut conn)
+    .await
+    .unwrap_err();
+    assert!(!err.is_connection_lost(), "got {err}");
+    assert_eq!(state.commit_fail_tokens.load(Ordering::Relaxed), 0);
+    assert_eq!(state.rollbacks.load(Ordering::Relaxed), rollbacks + 1);
+    drop(conn);
+
+    assert!(User::all().exec(&mut db).await.unwrap().is_empty());
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects);
+}
+
+/// The same, with the rollback failing too: the connection is still inside
+/// the plan's transaction, so it leaves the pool.
+#[tokio::test(start_paused = true)]
+async fn failed_plan_commit_and_rollback_discard_the_connection() {
+    let (mut db, state) = build_db(1, None, false).await;
+    let mut conn = db.connection().await.unwrap();
+    let connects = state.connects.load(Ordering::Relaxed);
+
+    state.commit_fail_tokens.store(1, Ordering::Relaxed);
+    state.rollback_fail_tokens.store(1, Ordering::Relaxed);
+    let err = toasty::batch((
+        toasty::create!(User {
+            name: "alice",
+            age: 30
+        }),
+        toasty::create!(User {
+            name: "bob",
+            age: 30
+        }),
+    ))
+    .exec(&mut conn)
+    .await
+    .unwrap_err();
+    assert!(!err.is_connection_lost(), "got {err}");
+    assert_eq!(state.rollback_fail_tokens.load(Ordering::Relaxed), 0);
+
+    let err = User::all().exec(&mut conn).await.unwrap_err();
+    assert!(
+        err.is_connection_lost(),
+        "expected connection_lost, got {err}"
+    );
+    drop(conn);
+
+    assert!(User::all().exec(&mut db).await.unwrap().is_empty());
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects + 1);
+}
+
+/// A nested commit cancelled in flight still releases its savepoint, and the
+/// dropped handle then queues a rollback to a savepoint that is gone. That
+/// rollback fails, but the outer transaction is open and owned: the
+/// connection stays usable, and the outer transaction writes, commits and
+/// leaves its rows behind.
+#[tokio::test(start_paused = true)]
+async fn cancelled_nested_commit_leaves_the_outer_transaction_usable() {
+    let (mut db, state) = build_db(1, None, false).await;
+    let connects = state.connects.load(Ordering::Relaxed);
+
+    let mut conn = db.connection().await.unwrap();
+    let mut tx = conn.transaction().await.unwrap();
+    toasty::create!(User {
+        name: "alice",
+        age: 30
+    })
+    .exec(&mut tx)
+    .await
+    .unwrap();
+
+    {
+        let nested = tx.transaction().await.unwrap();
+        let mut commit = Box::pin(nested.commit());
+        assert!(!poll_once(&mut commit).await, "the commit is in flight");
+        drop(commit);
+    }
+
+    toasty::create!(User {
+        name: "bob",
+        age: 30
+    })
+    .exec(&mut tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(conn);
+
+    assert_eq!(User::all().exec(&mut db).await.unwrap().len(), 2);
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects);
+}
+
+/// Transaction control sent as raw SQL leaves a transaction no `Transaction`
+/// owns: the connection is discarded, and the next operation on it says why.
+#[tokio::test(start_paused = true)]
+async fn raw_begin_leaves_a_transaction_nobody_owns() {
+    let (mut db, state) = build_db(1, None, false).await;
+
+    let mut conn = db.connection().await.unwrap();
+    toasty::sql::statement("BEGIN")
+        .exec(&mut conn)
+        .await
+        .unwrap();
+
+    let err = User::all().exec(&mut conn).await.unwrap_err();
+    assert!(
+        err.is_connection_lost(),
+        "expected connection_lost, got {err}"
+    );
+    assert!(err.to_string().contains("no Transaction owns"), "got {err}");
+    drop(conn);
+
+    let connects = state.connects.load(Ordering::Relaxed);
+    assert!(User::all().exec(&mut db).await.unwrap().is_empty());
+    assert_eq!(state.connects.load(Ordering::Relaxed), connects + 1);
 }
 
 /// A statement that panics while its caller polls it leaves the connection

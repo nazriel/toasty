@@ -122,7 +122,15 @@ impl Engine {
 
         if needs_transaction {
             tracing::trace!("committing plan transaction");
-            exec.connection.exec(&self.schema, commit.into()).await?;
+            if let Err(e) = exec.connection.exec(&self.schema, commit.into()).await {
+                tracing::debug!(error = %e, "committing plan transaction failed");
+                // The commit may have left the transaction open. Best effort,
+                // as above: the commit's error is the one returned, and the
+                // pool discards a connection that is still inside the
+                // transaction.
+                let _ = exec.connection.exec(&self.schema, rollback.into()).await;
+                return Err(e);
+            }
         }
 
         let response = exec.vars.load(returning).await?;

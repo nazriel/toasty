@@ -1,5 +1,11 @@
 use rusqlite::Connection as RusqliteConnection;
-use std::{panic, sync::Arc};
+use std::{
+    panic,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::sync::Mutex;
 use tracing::Dispatch;
 
@@ -22,13 +28,26 @@ use tracing::Dispatch;
 #[derive(Debug)]
 pub(crate) struct BlockingConnection {
     connection: Arc<Mutex<RusqliteConnection>>,
+
+    /// Whether the connection was inside a transaction when the last call
+    /// finished. Written on the blocking thread, right after the call's
+    /// closure, so reading it takes no SQLite call on the caller's thread.
+    in_transaction: Arc<AtomicBool>,
 }
 
 impl BlockingConnection {
     pub(crate) fn new(connection: RusqliteConnection) -> Self {
         Self {
             connection: Arc::new(Mutex::new(connection)),
+            // A connection that was just opened is in autocommit mode.
+            in_transaction: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the connection was inside a transaction when the last call
+    /// finished.
+    pub(crate) fn in_transaction(&self) -> bool {
+        self.in_transaction.load(Ordering::Acquire)
     }
 
     /// Runs `f` against the connection on the blocking thread pool and waits
@@ -56,9 +75,18 @@ impl BlockingConnection {
         // inside the caller's span tree, as they would if `f` ran inline.
         let dispatch = tracing::dispatcher::get_default(Dispatch::clone);
         let span = tracing::Span::current();
+        let in_transaction = self.in_transaction.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            tracing::dispatcher::with_default(&dispatch, || span.in_scope(|| f(&mut connection)))
+            tracing::dispatcher::with_default(&dispatch, || {
+                span.in_scope(|| {
+                    let result = f(&mut connection);
+                    // Whatever `f` did, including failing half way: a failed
+                    // `COMMIT` leaves the transaction open.
+                    in_transaction.store(!connection.is_autocommit(), Ordering::Release);
+                    result
+                })
+            })
         })
         .await;
 
