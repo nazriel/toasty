@@ -137,7 +137,7 @@ quote = "1.0.45"
 rand = "0.10"
 rust_decimal = "1.41.0"
 bigdecimal = "0.4.10"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sqlx-core = { version = "=0.9.0", default-features = false, features = ["_rt-tokio"] }
